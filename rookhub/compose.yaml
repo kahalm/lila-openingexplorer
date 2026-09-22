@@ -6,6 +6,7 @@ services:
     image: rookhub-explorer:latest
     container_name: rookhub-explorer
     restart: unless-stopped
+    user: "1000:1000"                # Dateien auf der Datenplatte gehören kahalm
     command:
       - lila-openingexplorer
       - --bind=0.0.0.0:9002
