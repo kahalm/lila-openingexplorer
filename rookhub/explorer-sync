@@ -1,0 +1,121 @@
+#!/bin/bash
+# Nachimport für den lokalen Explorer. Läuft im Image rookhub-explorer (täglich per Cron auf dem
+# Host, siehe README-rookhub.md) mit /data = /mnt/disks/sdf/rookhub-explorer.
+#
+#  1. Lichess: jeden Monats-Dump von database.lichess.org, der neuer als LICHESS_FROM ist und noch
+#     nicht importiert wurde (neueste zuerst): laden, sha256 prüfen, gefiltert importieren
+#     (Elo-Schnitt >= LICHESS_MIN_AVG, ohne Bullet/UltraBullet), Dump löschen.
+#  2. Meister: Lumbra's GigaBase „OTB partial <Jahr>" (monatlich aktualisiert) — nur wenn sich die
+#     Datei geändert hat. Dubletten erkennt der Server (inhaltsbasierte IDs).
+#
+# Der Import ist idempotent (Lichess: Partie-ID, Meister: Inhalts-Hash), ein abgebrochener Lauf
+# darf also einfach wiederholt werden. flock verhindert parallele Läufe.
+set -euo pipefail
+
+DATA=${DATA:-/data}
+ENDPOINT=${ENDPOINT:-http://rookhub-explorer:9002}
+LICHESS_FROM=${LICHESS_FROM:-2025-01}
+LICHESS_MIN_AVG=${LICHESS_MIN_AVG:-1600}
+STATE=$DATA/state
+DUMPS=$DATA/dumps
+mkdir -p "$STATE" "$DUMPS" "$DATA/masters"
+touch "$STATE/lichess-imported.txt"
+
+exec 9>"$STATE/sync.lock"
+if ! flock -n 9; then
+    echo "$(date -Is) anderer Lauf aktiv — Abbruch"
+    exit 0
+fi
+
+log() { echo "$(date -Is) $*"; }
+
+curl -fsS "$ENDPOINT/monitor" > /dev/null || { log "Explorer $ENDPOINT nicht erreichbar"; exit 1; }
+
+# ---------------------------------------------------------------- Lichess
+sync_lichess() {
+    local base=https://database.lichess.org/standard
+    local sums
+    sums=$(curl -fsS "$base/sha256sums.txt")
+    curl -fsS "$base/list.txt" | sed 's#.*/##' | sort -r | while read -r file; do
+        local month=${file#lichess_db_standard_rated_}
+        month=${month%.pgn.zst}
+        [[ $month < $LICHESS_FROM ]] && continue
+        grep -qx "$month" "$STATE/lichess-imported.txt" && continue
+
+        if [[ ! -f $DUMPS/$file ]]; then
+            log "Lichess $month: Download"
+            # -C - setzt einen abgebrochenen Download fort
+            curl -fsS --retry 5 -C - -o "$DUMPS/$file.part" "$base/$file" || { log "Download $file fehlgeschlagen"; return 1; }
+            mv "$DUMPS/$file.part" "$DUMPS/$file"
+        fi
+        local want have
+        want=$(awk -v f="$file" '$2 == f {print $1}' <<< "$sums")
+        have=$(sha256sum "$DUMPS/$file" | cut -d' ' -f1)
+        if [[ -z $want || $want != "$have" ]]; then
+            log "Lichess $month: Prüfsumme falsch ($have != $want) — Dump verworfen"
+            rm -f "$DUMPS/$file"
+            return 1
+        fi
+
+        log "Lichess $month: Import (Schnitt >= $LICHESS_MIN_AVG, ohne Bullet)"
+        if ! import-lichess --endpoint "$ENDPOINT" --min-avg-rating "$LICHESS_MIN_AVG" \
+            --exclude-speed bullet --exclude-speed ultraBullet "$DUMPS/$file" | tr '\r' '\n' | tail -1; then
+            log "Lichess $month: Import fehlgeschlagen — nächster Lauf versucht es erneut"
+            return 1
+        fi
+        echo "$month" >> "$STATE/lichess-imported.txt"
+        rm -f "$DUMPS/$file"
+        log "Lichess $month: fertig"
+    done
+}
+
+# ---------------------------------------------------------------- Meister (Lumbra)
+lumbra_mega_link() {
+    # Download-Seite → wpdm-Link des Pakets (mit frischem refresh-Token) → Weiterleitung auf MEGA.
+    local slug=$1 page wpdm
+    page=$(curl -fsSL -A 'Mozilla/5.0' https://lumbrasgigabase.com/en/download-in-pgn-format-en/)
+    wpdm=$(grep -o -E "data-downloadurl=\"https://lumbrasgigabase.com/download/$slug/[^\"]*\"" <<< "$page" \
+        | head -1 | sed -e 's/data-downloadurl="//' -e 's/"$//' -e 's/&#038;/\&/g')
+    [[ -n $wpdm ]] || return 1
+    curl -fsS -o /dev/null -A 'Mozilla/5.0' -w '%{redirect_url}' "$wpdm"
+}
+
+import_lumbra() {
+    local slug=$1 link file
+    link=$(lumbra_mega_link "$slug") || { log "Lumbra $slug: kein Link gefunden"; return 0; }
+    [[ $link == https://mega.nz/* ]] || { log "Lumbra $slug: unerwarteter Link $link"; return 0; }
+    if grep -qxF "$link" "$STATE/lumbra-imported.txt" 2>/dev/null; then
+        return 0
+    fi
+    log "Lumbra $slug: neue Version, Download"
+    rm -rf "$DATA/masters/tmp" && mkdir -p "$DATA/masters/tmp"
+    # Fehler hier explizit prüfen: sync_masters läuft in einer ||-Liste, dort greift set -e nicht.
+    megatools dl --no-progress --path "$DATA/masters/tmp" "$link" || { log "Lumbra $slug: Download fehlgeschlagen"; return 1; }
+    file=$(ls "$DATA/masters/tmp"/*.7z 2>/dev/null | head -1)
+    [[ -n $file ]] || { log "Lumbra $slug: kein .7z im Download"; return 1; }
+    log "Lumbra $slug: Import $(basename "$file")"
+    if ! 7z x -so "$file" 2>/dev/null | import-masters --endpoint "$ENDPOINT" /dev/stdin 2>/dev/null | tail -1; then
+        log "Lumbra $slug: Import fehlgeschlagen"
+        return 1
+    fi
+    echo "$link" >> "$STATE/lumbra-imported.txt"
+    rm -rf "$DATA/masters/tmp"
+    log "Lumbra $slug: fertig"
+}
+
+sync_masters() {
+    local year
+    year=$(date +%Y)
+    import_lumbra "otb-partial-$year" || return 1
+    # Im Januar kann das Vorjahr noch einen Nachtrag bekommen haben.
+    if [[ $(date +%m) == 01 ]]; then import_lumbra "otb-$((year - 1))" || return 1; fi
+    return 0
+}
+
+case "${1:-all}" in
+    lichess) sync_lichess ;;
+    masters) sync_masters ;;
+    all) sync_masters || log "Meister-Sync fehlgeschlagen — weiter mit Lichess"; sync_lichess ;;
+    *) echo "usage: explorer-sync [all|lichess|masters]"; exit 2 ;;
+esac
+log "Sync fertig"

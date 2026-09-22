@@ -30,6 +30,12 @@ pub struct LilaOpt {
     bearer_file: Option<String>,
 }
 
+impl LilaOpt {
+    pub fn has_bearer(&self) -> bool {
+        self.bearer.is_some() || self.bearer_file.is_some()
+    }
+}
+
 pub struct Lila {
     client: reqwest::Client,
     opt: LilaOpt,

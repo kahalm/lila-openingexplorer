@@ -1,0 +1,40 @@
+# Lokaler Eröffnungs-Explorer (lila-openingexplorer, Fork unter ~/claude/rookhubstack/explorer).
+# Liefert /lichess und /masters wie explorer.lichess.ovh — für den Lochfinder in rookhub.
+# Admin-Endpoints (/import/*, /compact) NIE öffentlich routen: nur interne Docker-Netze + localhost.
+services:
+  explorer:
+    image: rookhub-explorer:latest
+    container_name: rookhub-explorer
+    restart: unless-stopped
+    command:
+      - lila-openingexplorer
+      - --bind=0.0.0.0:9002
+      - --db=/data/db
+      - --db-compaction-readahead
+      - --db-cache=6442450944        # 6 GiB Block-Cache
+      - --db-rate-limit=67108864     # 64 MiB/s Schreiblimit für Flush/Compaction (HDD)
+    ulimits:
+      nofile: 131072
+    volumes:
+      - /mnt/disks/sdf/rookhub-explorer:/data
+    ports:
+      - "127.0.0.1:9002:9002"        # nur lokal: Import-Jobs + Tests vom Host
+    labels:
+      - com.centurylinklabs.watchtower.enable=false   # lokal gebautes Image, nichts zu ziehen
+    networks:
+      - default
+      - rookhub
+      - rookhub-dev
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9002/monitor"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  rookhub:
+    external: true
+    name: rookhub-schach_rookhub
+  rookhub-dev:
+    external: true
+    name: rookhub-schach-dev_rookhub-dev

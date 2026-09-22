@@ -1,0 +1,28 @@
+# RookHub-Build des Lichess-Opening-Explorers: Server + Import-Werkzeuge in einem schlanken Image.
+FROM rust:1-trixie AS build
+RUN apt-get update && apt-get install -y --no-install-recommends libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    --mount=type=cache,target=/app/import-pgn/target \
+    set -a && . ./.env && set +a \
+    && cargo build --release \
+    && cargo build --release --manifest-path import-pgn/Cargo.toml \
+    && mkdir -p /out \
+    && cp target/release/lila-openingexplorer import-pgn/target/release/import-lichess \
+          import-pgn/target/release/import-masters /out/
+
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libssl3 zstd 7zip \
+    && rm -rf /var/lib/apt/lists/*
+# megatools (statisch) für die Lumbra-Downloads von MEGA
+RUN curl -fsSL https://xff.cz/megatools/builds/builds/megatools-1.11.5.20250706-linux-x86_64.tar.gz \
+    | tar xz -C /tmp && mv /tmp/megatools-*/megatools /usr/local/bin/ && rm -rf /tmp/megatools-*
+COPY --from=build /out/ /usr/local/bin/
+COPY rookhub/ /usr/local/bin/
+ENV EXPLORER_LOG=lila_openingexplorer=info
+EXPOSE 9002
+CMD ["lila-openingexplorer", "--bind", "0.0.0.0:9002"]

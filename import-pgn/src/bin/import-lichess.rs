@@ -20,6 +20,18 @@ enum Speed {
 }
 
 impl Speed {
+    /// Name as used by the API (`ultraBullet`, `bullet`, ...).
+    fn name(self) -> &'static str {
+        match self {
+            Speed::UltraBullet => "ultraBullet",
+            Speed::Bullet => "bullet",
+            Speed::Blitz => "blitz",
+            Speed::Rapid => "rapid",
+            Speed::Classical => "classical",
+            Speed::Correspondence => "correspondence",
+        }
+    }
+
     fn from_seconds_and_increment(seconds: u64, increment: u64) -> Speed {
         let total = seconds + 40 * increment;
 
@@ -64,11 +76,40 @@ impl Batch {
     }
 }
 
+/// Optional pre-filter, so that only the games worth keeping are sent to the
+/// indexer. Speeds up imports and keeps the database small.
+#[derive(Clone, Default)]
+struct Filter {
+    /// Skip games whose average rating (as used for the rating groups) is
+    /// below this value.
+    min_avg_rating: Option<u16>,
+    /// Skip games with these speeds (API names, e.g. `bullet`).
+    exclude_speeds: Vec<String>,
+}
+
+impl Filter {
+    fn accepts(&self, game: &Game) -> bool {
+        if let (Some(min), Some(white), Some(black)) =
+            (self.min_avg_rating, game.white.rating, game.black.rating)
+        {
+            let avg = (u32::from(white) + u32::from(black)) / 2;
+            if avg < u32::from(min) {
+                return false;
+            }
+        }
+        match game.speed {
+            Some(speed) => !self.exclude_speeds.iter().any(|s| s == speed.name()),
+            None => true,
+        }
+    }
+}
+
 struct Importer<'a> {
     tx: crossbeam::channel::Sender<Batch>,
     filename: PathBuf,
     batch_size: usize,
     progress: &'a ProgressBar,
+    filter: Filter,
 
     batch: Vec<Game>,
 }
@@ -101,6 +142,7 @@ impl Importer<'_> {
         filename: PathBuf,
         batch_size: usize,
         progress: &ProgressBar,
+        filter: Filter,
     ) -> Importer<'_> {
         Importer {
             tx,
@@ -108,6 +150,7 @@ impl Importer<'_> {
             batch_size,
             batch: Vec::with_capacity(batch_size),
             progress,
+            filter,
         }
     }
 
@@ -187,7 +230,8 @@ impl Visitor for Importer<'_> {
     }
 
     fn begin_movetext(&mut self, game: Game) -> ControlFlow<Self::Output, Self::Movetext> {
-        if game.white.rating.is_none() || game.black.rating.is_none() {
+        if game.white.rating.is_none() || game.black.rating.is_none() || !self.filter.accepts(&game)
+        {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(game)
@@ -215,11 +259,21 @@ struct Args {
     batch_size: usize,
     #[arg(long)]
     avoid_utc_hour: Vec<u8>,
+    /// Skip games with an average rating below this value.
+    #[arg(long)]
+    min_avg_rating: Option<u16>,
+    /// Skip games with this speed (repeatable, e.g. `--exclude-speed bullet`).
+    #[arg(long)]
+    exclude_speed: Vec<String>,
     pgns: Vec<PathBuf>,
 }
 
 fn main() -> Result<(), io::Error> {
     let args = Args::parse();
+    let filter = Filter {
+        min_avg_rating: args.min_avg_rating,
+        exclude_speeds: args.exclude_speed.clone(),
+    };
 
     let (tx, rx) = crossbeam::channel::bounded::<Batch>(50);
 
@@ -280,7 +334,8 @@ fn main() -> Result<(), io::Error> {
         };
 
         let mut reader = Reader::new(uncompressed);
-        let mut importer = Importer::new(tx.clone(), arg, args.batch_size, &progress);
+        let mut importer =
+            Importer::new(tx.clone(), arg, args.batch_size, &progress, filter.clone());
         reader.visit_all_games(&mut importer)?;
         importer.send();
 

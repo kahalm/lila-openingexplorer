@@ -135,7 +135,13 @@ async fn serve() {
     join_set.spawn(periodic_openings_import(openings));
 
     let blacklist: &'static RwLock<HashSet<UserId>> = Box::leak(Box::default());
-    join_set.spawn(periodic_blacklist_update(blacklist, opt.lila.clone()));
+    // RookHub: the mod-marked stream needs the OpeningExplorer token. Without
+    // one, every request fails and would be retried every 5 seconds.
+    if opt.lila.has_bearer() {
+        join_set.spawn(periodic_blacklist_update(blacklist, opt.lila.clone()));
+    } else {
+        log::warn!("no lila bearer configured, not updating player blacklist");
+    }
 
     let db = task::block_in_place(|| Arc::new(Database::open(opt.db).expect("db")));
     let player_indexer =
