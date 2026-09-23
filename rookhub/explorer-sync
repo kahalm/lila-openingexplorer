@@ -16,10 +16,11 @@ DATA=${DATA:-/data}
 ENDPOINT=${ENDPOINT:-http://rookhub-explorer:9002}
 LICHESS_FROM=${LICHESS_FROM:-2025-01}
 LICHESS_MIN_AVG=${LICHESS_MIN_AVG:-1600}
-# Lichess-Importe pausieren in diesen UTC-Stunden (Standard: 06–22 Uhr Wiener Sommerzeit). Ein Import
-# schreibt schneller, als RocksDB auf der HDD kompaktiert — tagsüber holt die Kompaktierung auf, damit
-# Abfragen schnell bleiben. Leer = rund um die Uhr importieren.
-IMPORT_AVOID_UTC_HOURS=${IMPORT_AVOID_UTC_HOURS-4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19}
+# Lichess-Importe pausieren in diesen UTC-Stunden, z.B. "4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19"
+# = 06–22 Uhr Wiener Sommerzeit. Ein Import schreibt schneller, als RocksDB auf der HDD kompaktiert;
+# währenddessen werden /lichess-Abfragen langsam (Sekunden). Standard: leer = rund um die Uhr
+# importieren (User-Entscheidung 2026-09-23 — rookhub fängt Ausreißer mit 30 s Timeout ab).
+IMPORT_AVOID_UTC_HOURS=${IMPORT_AVOID_UTC_HOURS-}
 STATE=$DATA/state
 DUMPS=$DATA/dumps
 mkdir -p "$STATE" "$DUMPS" "$DATA/masters"
