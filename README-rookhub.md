@@ -47,6 +47,12 @@ docker run --rm --name rookhub-explorer-sync --user 1000:1000 --network rookhub-
 2. **Lichess**: jeder Monat ≥ `LICHESS_FROM`, der nicht in `state/lichess-imported.txt` steht, neueste
    zuerst: Download (fortsetzbar), sha256 gegen `sha256sums.txt`, gefilterter Import, Dump löschen.
 
+**Import nur nachts:** `import-lichess` pausiert in den UTC-Stunden aus `IMPORT_AVOID_UTC_HOURS`
+(Standard 4–19 = 06–22 Uhr Sommerzeit). Ein Monat (~28 Mio. Partien, ~27 GB DB) schreibt schneller,
+als RocksDB auf der HDD kompaktiert; während des Rückstands steigen die `/lichess`-Latenzen auf
+Sekunden. Tagsüber holt die Kompaktierung auf. Rückstand prüfen:
+`curl 127.0.0.1:9002/monitor/cf/lichess/rocksdb.estimate-pending-compaction-bytes`.
+
 Alles idempotent; `flock` + fester Containername verhindern parallele Läufe. Einen Monat erneut
 importieren: Zeile aus `state/lichess-imported.txt` löschen. Weiter zurück: `-e LICHESS_FROM=2024-01`.
 

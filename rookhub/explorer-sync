@@ -16,6 +16,10 @@ DATA=${DATA:-/data}
 ENDPOINT=${ENDPOINT:-http://rookhub-explorer:9002}
 LICHESS_FROM=${LICHESS_FROM:-2025-01}
 LICHESS_MIN_AVG=${LICHESS_MIN_AVG:-1600}
+# Lichess-Importe pausieren in diesen UTC-Stunden (Standard: 06–22 Uhr Wiener Sommerzeit). Ein Import
+# schreibt schneller, als RocksDB auf der HDD kompaktiert — tagsüber holt die Kompaktierung auf, damit
+# Abfragen schnell bleiben. Leer = rund um die Uhr importieren.
+IMPORT_AVOID_UTC_HOURS=${IMPORT_AVOID_UTC_HOURS-4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19}
 STATE=$DATA/state
 DUMPS=$DATA/dumps
 mkdir -p "$STATE" "$DUMPS" "$DATA/masters"
@@ -57,9 +61,12 @@ sync_lichess() {
             return 1
         fi
 
-        log "Lichess $month: Import (Schnitt >= $LICHESS_MIN_AVG, ohne Bullet)"
+        local avoid=() h
+        for h in $IMPORT_AVOID_UTC_HOURS; do avoid+=(--avoid-utc-hour "$h"); done
+        log "Lichess $month: Import (Schnitt >= $LICHESS_MIN_AVG, ohne Bullet, Pause UTC-Stunden: ${IMPORT_AVOID_UTC_HOURS:-keine})"
         if ! import-lichess --endpoint "$ENDPOINT" --min-avg-rating "$LICHESS_MIN_AVG" \
-            --exclude-speed bullet --exclude-speed ultraBullet "$DUMPS/$file" | tr '\r' '\n' | tail -1; then
+            --exclude-speed bullet --exclude-speed ultraBullet "${avoid[@]}" "$DUMPS/$file" \
+            | sed '/paused around this time/d' | tr '\r' '\n' | tail -1; then
             log "Lichess $month: Import fehlgeschlagen — nächster Lauf versucht es erneut"
             return 1
         fi
