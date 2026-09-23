@@ -9,6 +9,7 @@ ohne Token und ohne Rate-Limit. Genutzt vom Lochfinder in rookhub (`LichessExplo
 | Was | Wo |
 |---|---|
 | Stack | `/opt/stacks/rookhub-explorer/compose.yaml` (Container `rookhub-explorer`) |
+| Cache | 3 GiB RocksDB-Block-Cache (`--db-cache`, 2026-09-23 von 6 GiB gesenkt: Host hat 47 GB für alle Dienste) |
 | Daten | `/mnt/disks/sdf/rookhub-explorer/` — `db/` (RocksDB), `dumps/`, `masters/`, `state/`, `sync.log` |
 | Image | `rookhub-explorer:latest`, lokal gebaut: `docker build -f Dockerfile.rookhub -t rookhub-explorer:latest .` |
 | Intern | `http://rookhub-explorer:9002/` in `rookhub-schach_rookhub` und `rookhub-schach-dev_rookhub-dev` |
