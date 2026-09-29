@@ -8,19 +8,30 @@ ohne Token und ohne Rate-Limit. Genutzt vom Lochfinder in rookhub (`LichessExplo
 
 | Was | Wo |
 |---|---|
-| Stack | `/opt/stacks/rookhub-explorer/compose.yaml` (Container `rookhub-explorer`) |
+| Stack | `/opt/stacks/rookhub-explorer/` = `rookhub/compose.yaml` + `rookhub/explorer-gateway.conf` (Container `rookhub-explorer`, `rookhub-explorer-gateway`) |
 | Cache | 3 GiB RocksDB-Block-Cache (`--db-cache`, 2026-09-23 von 6 GiB gesenkt: Host hat 47 GB für alle Dienste) |
 | Daten | `/mnt/disks/sdf/rookhub-explorer/` — `db/` (RocksDB), `dumps/`, `masters/`, `state/`, `sync.log` |
 | Image | `rookhub-explorer:latest`, lokal gebaut: `docker build -f Dockerfile.rookhub -t rookhub-explorer:latest .` |
-| Intern | `http://rookhub-explorer:9002/` in `rookhub-schach_rookhub` und `rookhub-schach-dev_rookhub-dev` |
-| Host | `http://127.0.0.1:9002/` (nur localhost) |
+| rookhub-Netze | `http://rookhub-explorer:9002/` in `rookhub-schach_rookhub` und `rookhub-schach-dev_rookhub-dev` = der **Gateway** (Alias), nur `GET /lichess` und `GET /masters`, alles andere 403 |
+| Direkt | `http://rookhub-explorer:9002/` im Netz `rookhub-explorer_default` (Gateway, `explorer-sync`) |
+| Host | `http://127.0.0.1:9002/` (nur localhost, direkt) |
 
-Öffentlich nutzbar sind nur `GET /lichess`, `GET /masters` (und `/monitor`). `/import/*` und
-`/compact` sind Admin-Endpoints — nie nach außen routen.
+Der Explorer hat keine Authentifizierung. Admin sind `/import/*`, `/compact` und auch `GET /player`
+(`/personal`): das lädt die ganze Partiehistorie beliebiger Lichess-Konten dauerhaft in die DB. Diese
+Routen (und `/monitor`) erreichen nur localhost und das Netz `rookhub-explorer_default`; die
+rookhub-Container (PROD und DEV) sehen nur den Gateway (`rookhub/explorer-gateway.conf`). Den Explorer
+nie selbst in die rookhub-Netze hängen und nie nach außen routen.
 
 ```sh
 curl '127.0.0.1:9002/masters?fen=rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR%20b%20KQkq%20-%200%201&moves=5&topGames=0'
 curl '127.0.0.1:9002/lichess?variant=standard&fen=…&ratings=1600,1800,2000&speeds=blitz,rapid,classical&moves=40&topGames=0&recentGames=0'
+```
+
+Prüfen, wie ein rookhub-Container es sieht (erwartet `403`; `/masters?fen=…` dagegen `200`):
+
+```sh
+docker run --rm --network rookhub-schach-dev_rookhub-dev --entrypoint curl rookhub-explorer:latest \
+  -s -o /dev/null -w '%{http_code}\n' -X POST http://rookhub-explorer:9002/compact
 ```
 
 ## Datenumfang
@@ -65,4 +76,4 @@ importieren: Zeile aus `state/lichess-imported.txt` löschen. Weiter zurück: `-
 - `src/main.rs`/`src/lila.rs`: Spieler-Blacklist nur mit Lichess-Token abfragen (ohne Token schlug
   der Abruf alle 5 s mit 401 fehl).
 - `Cargo.toml`: rocksdb ohne `io-uring` (Docker blockiert io_uring per seccomp).
-- `Dockerfile.rookhub`, `rookhub/explorer-sync`, diese Datei.
+- `Dockerfile.rookhub`, `rookhub/explorer-sync`, `rookhub/explorer-gateway.conf`, diese Datei.
