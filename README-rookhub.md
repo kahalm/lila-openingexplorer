@@ -27,11 +27,30 @@ curl '127.0.0.1:9002/masters?fen=rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR%2
 curl '127.0.0.1:9002/lichess?variant=standard&fen=…&ratings=1600,1800,2000&speeds=blitz,rapid,classical&moves=40&topGames=0&recentGames=0'
 ```
 
-Prüfen, wie ein rookhub-Container es sieht (erwartet `403`; `/masters?fen=…` dagegen `200`):
+Gateway einführen, ohne den Explorer neu zu erstellen (ein volles `docker compose up -d` erstellt ihn
+neu = RocksDB-Neustart), in `/opt/stacks/rookhub-explorer/`:
 
 ```sh
-docker run --rm --network rookhub-schach-dev_rookhub-dev --entrypoint curl rookhub-explorer:latest \
-  -s -o /dev/null -w '%{http_code}\n' -X POST http://rookhub-explorer:9002/compact
+docker compose up -d explorer-gateway
+docker network disconnect rookhub-schach_rookhub rookhub-explorer
+docker network disconnect rookhub-schach-dev_rookhub-dev rookhub-explorer
+```
+
+Prüfen, wie ein rookhub-Container es sieht, erst **nach beiden** `network disconnect`: Vor dem
+Deploy antwortet in den rookhub-Netzen der Explorer selbst, und im Übergangsfenster liefert Docker-DNS
+für `rookhub-explorer` beide Container, ein Teil der Anfragen landet also direkt am Explorer. Deshalb
+prüft der Befehl nur mit der harmlosen Route `GET /monitor` (über den Gateway `403`, direkt `200`) und
+mehrfach, nie mit `/compact`, `/import/*` oder `/player`. Erwartet je Netz `10 403`; jede `200` heißt,
+der Explorer hängt dort noch (disconnect wiederholen). `/masters?fen=…` liefert `200`.
+
+```sh
+for net in rookhub-schach_rookhub rookhub-schach-dev_rookhub-dev; do
+  echo "$net:"
+  docker run --rm --network "$net" --entrypoint sh rookhub-explorer:latest -c \
+    'for i in 1 2 3 4 5 6 7 8 9 10; do
+       curl -s -o /dev/null -w "%{http_code}\n" http://rookhub-explorer:9002/monitor
+     done' | sort | uniq -c
+done
 ```
 
 ## Datenumfang

@@ -36,7 +36,7 @@ services:
   # alles andere = 403 (explorer-gateway.conf). Alias rookhub-explorer: LICHESS_EXPLORER_LOCAL_URL=
   # http://rookhub-explorer:9002/ in beiden rookhub-Stacks bleibt unverändert und landet hier.
   explorer-gateway:
-    image: nginx:1.27-alpine
+    image: nginx:1.30-alpine           # stabiler Zweig; Watchtower zieht nur Patch-Releases
     container_name: rookhub-explorer-gateway
     restart: unless-stopped
     volumes:
