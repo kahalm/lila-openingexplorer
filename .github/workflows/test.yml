@@ -17,3 +17,5 @@ jobs:
           RUSTFLAGS: --cfg tokio_unstable
       - run: cargo bench
       - run: cargo test --manifest-path import-pgn/Cargo.toml
+      # seed-db.sh and README.md rely on plain `cargo run` (default-run = import-lichess).
+      - run: cargo run --manifest-path import-pgn/Cargo.toml -- --help

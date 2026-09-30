@@ -3,6 +3,9 @@ name = "import-pgn"
 version = "0.0.0"
 publish = false
 edition = "2021"
+# Two binaries (import-lichess, import-masters): plain `cargo run` keeps
+# starting the Lichess importer, as upstream.
+default-run = "import-lichess"
 
 [dependencies]
 pgn-reader = "0.29"

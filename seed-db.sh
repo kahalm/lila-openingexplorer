@@ -1,5 +1,11 @@
 #!/bin/sh
 
+set -e
+
+# Build first, so that a build error stops the script (the Lichess sample
+# below is expected to end with an error).
+cargo build --release --manifest-path import-pgn/Cargo.toml
+
 ##############
 
 echo "Importing sample of Lichess games into db..."
@@ -9,7 +15,10 @@ curl \
     --remote-name \
     https://database.lichess.org/standard/lichess_db_standard_rated_2026-04.pgn.zst
 
-cargo run --release --manifest-path import-pgn/Cargo.toml -- *.pgn.zst
+# The sample is cut off after 50 MB: import-lichess imports everything up to
+# that point and then fails with "incomplete frame", which is expected here.
+cargo run --release --manifest-path import-pgn/Cargo.toml -- *.pgn.zst \
+    || echo "import-lichess exited with $? (expected for the truncated sample)"
 
 ##############
 
@@ -21,4 +30,4 @@ curl \
 
 unzip twic1644g.zip
 
-python3 import-master.py twic1644.pgn
+cargo run --release --manifest-path import-pgn/Cargo.toml --bin import-masters -- twic1644.pgn

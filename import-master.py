@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+# DEPRECATED (RookHub fork): use the Rust importer instead,
+#   cargo run --release --manifest-path import-pgn/Cargo.toml --bin import-masters -- <pgn>
+# (see README-rookhub.md). This script derives game ids differently (SHA-256
+# over the JSON instead of FNV-1a over six fields), so mixing both importers in
+# one database stores the same game twice.
+
 import base64
 import chess
 import chess.pgn
@@ -67,4 +73,5 @@ def deterministic_id(obj):
 
 
 if __name__ == "__main__":
+    print("import-master.py is deprecated, use import-masters (import-pgn)", file=sys.stderr)
     main(open(sys.argv[1], errors="ignore"))
