@@ -325,3 +325,144 @@ fn main() -> Result<(), io::Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MOVES: &str = "e2e4 e7e5 d1h5 b8c6 f1c4 g8f6 h5f7";
+
+    fn masters_game(white: &str, black: &str) -> MastersGame {
+        MastersGame {
+            id: String::new(),
+            event: "Test Open".to_owned(),
+            site: "Wien".to_owned(),
+            date: "2000.01.01".to_owned(),
+            round: "1".to_owned(),
+            white: Player {
+                name: white.to_owned(),
+                rating: 2500,
+            },
+            black: Player {
+                name: black.to_owned(),
+                rating: 2500,
+            },
+            winner: Some("white"),
+            moves: MOVES.to_owned(),
+        }
+    }
+
+    #[test]
+    fn deterministic_id_is_stable() {
+        // Golden value (cross-checked with an independent FNV-1a implementation).
+        // If this changes, every re-imported Lumbra game gets a new id.
+        assert_eq!(
+            deterministic_id(&masters_game("Alpha, A", "Beta, B")),
+            "d3UDZnpe"
+        );
+        assert_eq!(
+            deterministic_id(&masters_game("Beta, B", "Alpha, A")),
+            "9FN8aUhv"
+        );
+    }
+
+    /// A PGN with default tags, overridden by `tags` (an empty value drops the tag).
+    fn pgn(tags: &[(&'static str, &'static str)]) -> String {
+        let mut all = vec![
+            ("Event", "Test Open"),
+            ("Site", "Wien"),
+            ("Date", "2000.01.01"),
+            ("Round", "1"),
+            ("White", "Alpha, A"),
+            ("Black", "Beta, B"),
+            ("Result", "1-0"),
+            ("WhiteElo", "2500"),
+            ("BlackElo", "2500"),
+        ];
+        for &(name, value) in tags {
+            match all.iter_mut().find(|(n, _)| *n == name) {
+                Some(tag) => tag.1 = value,
+                None => all.push((name, value)),
+            }
+        }
+        let mut pgn: String = all
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(name, value)| format!("[{name} \"{value}\"]\n"))
+            .collect();
+        pgn.push_str("\n1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7# 1-0\n\n");
+        pgn
+    }
+
+    /// Runs the importer on `pgn`, returns the games it would send.
+    fn import(pgn: &str) -> Vec<MastersGame> {
+        let (tx, rx) = crossbeam::channel::unbounded();
+        let mut importer = Importer {
+            tx,
+            min_avg_rating: 2200,
+            skipped: 0,
+        };
+        Reader::new(pgn.as_bytes())
+            .visit_all_games(&mut importer)
+            .expect("read pgn");
+        drop(importer);
+        rx.try_iter().collect()
+    }
+
+    fn accepted(tags: &[(&'static str, &'static str)]) -> bool {
+        !import(&pgn(tags)).is_empty()
+    }
+
+    #[test]
+    fn accepted_game_is_converted() {
+        let games = import(&pgn(&[]));
+        assert_eq!(games.len(), 1);
+        let game = &games[0];
+        assert_eq!(game.moves, MOVES);
+        assert_eq!(game.winner, Some("white"));
+        assert_eq!(game.id, "d3UDZnpe");
+    }
+
+    #[test]
+    fn year_from_1952() {
+        assert!(!accepted(&[("Date", "1951.12.31")]));
+        assert!(accepted(&[("Date", "1952.01.01")]));
+        assert!(accepted(&[("Date", "1952.??.??")]));
+        assert!(!accepted(&[("Date", "????.??.??")]));
+        assert!(!accepted(&[("Date", "")]));
+    }
+
+    #[test]
+    fn both_ratings_required_and_average_rounded_down() {
+        assert!(!accepted(&[("WhiteElo", "")]));
+        assert!(!accepted(&[("BlackElo", "")]));
+        assert!(!accepted(&[("WhiteElo", "?")]));
+        assert!(!accepted(&[("WhiteElo", "0")]));
+        // (2200 + 2199) / 2 = 2199 on the server (`util::midpoint`).
+        assert!(!accepted(&[("WhiteElo", "2200"), ("BlackElo", "2199")]));
+        assert!(accepted(&[("WhiteElo", "2200"), ("BlackElo", "2200")]));
+        assert!(accepted(&[("WhiteElo", "2201"), ("BlackElo", "2199")]));
+    }
+
+    #[test]
+    fn standard_start_position_only() {
+        assert!(accepted(&[(
+            "FEN",
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        )]));
+        assert!(!accepted(&[(
+            "FEN",
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        )]));
+        assert!(accepted(&[("Variant", "Standard")]));
+        assert!(!accepted(&[("Variant", "Chess960")]));
+    }
+
+    #[test]
+    fn result_and_names_required() {
+        assert!(!accepted(&[("Result", "*")]));
+        assert!(accepted(&[("Result", "1/2-1/2")]));
+        assert!(!accepted(&[("White", "?")]));
+        assert!(!accepted(&[("Black", "")]));
+    }
+}

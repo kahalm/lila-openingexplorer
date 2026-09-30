@@ -370,3 +370,99 @@ fn main() -> Result<(), io::Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_SPEEDS: [Speed; 6] = [
+        Speed::UltraBullet,
+        Speed::Bullet,
+        Speed::Blitz,
+        Speed::Rapid,
+        Speed::Classical,
+        Speed::Correspondence,
+    ];
+
+    fn game(white: u16, black: u16, speed: Option<Speed>) -> Game {
+        Game {
+            speed,
+            white: Player {
+                name: None,
+                rating: Some(white),
+            },
+            black: Player {
+                name: None,
+                rating: Some(black),
+            },
+            ..Game::default()
+        }
+    }
+
+    /// The filter as `rookhub/explorer-sync` calls it.
+    fn rookhub_filter() -> Filter {
+        Filter {
+            min_avg_rating: Some(1600),
+            exclude_speeds: vec!["bullet".to_owned(), "ultraBullet".to_owned()],
+        }
+    }
+
+    #[test]
+    fn min_avg_rating_rounds_down_like_the_server_rating_groups() {
+        // The server groups by (white + black) / 2 rounded down (`util::midpoint`):
+        // 1599.5 is group 1400 there, so it must not pass a 1600 filter.
+        let filter = rookhub_filter();
+        assert!(!filter.accepts(&game(1600, 1599, None)));
+        assert!(!filter.accepts(&game(1599, 1599, None)));
+        assert!(filter.accepts(&game(1600, 1600, None)));
+        assert!(filter.accepts(&game(1601, 1599, None)));
+        assert!(filter.accepts(&game(2800, 400, None)));
+    }
+
+    #[test]
+    fn default_filter_accepts_everything() {
+        for speed in ALL_SPEEDS {
+            assert!(Filter::default().accepts(&game(400, 400, Some(speed))));
+        }
+    }
+
+    #[test]
+    fn excludes_speeds_by_api_name() {
+        let filter = rookhub_filter();
+        for speed in ALL_SPEEDS {
+            let expected = !matches!(speed, Speed::Bullet | Speed::UltraBullet);
+            assert_eq!(
+                filter.accepts(&game(2000, 2000, Some(speed))),
+                expected,
+                "{}",
+                speed.name()
+            );
+        }
+        // Games without a time control are kept.
+        assert!(filter.accepts(&game(2000, 2000, None)));
+    }
+
+    #[test]
+    fn speed_names_match_the_serialized_api_names() {
+        for speed in ALL_SPEEDS {
+            assert_eq!(
+                serde_json::to_string(&speed).unwrap(),
+                format!("\"{}\"", speed.name())
+            );
+        }
+    }
+
+    #[test]
+    fn speed_from_time_control() {
+        let speed = |tc: &[u8]| Speed::from_bytes(tc).unwrap().name();
+        assert_eq!(speed(b"15+0"), "ultraBullet");
+        assert_eq!(speed(b"60+0"), "bullet");
+        assert_eq!(speed(b"120+1"), "bullet");
+        assert_eq!(speed(b"180+0"), "blitz");
+        assert_eq!(speed(b"300+3"), "blitz");
+        assert_eq!(speed(b"600+0"), "rapid");
+        assert_eq!(speed(b"1800+0"), "classical");
+        assert_eq!(speed(b"-"), "correspondence");
+        assert!(Speed::from_bytes(b"300").is_err());
+    }
+}
