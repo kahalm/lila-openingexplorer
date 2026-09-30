@@ -96,7 +96,7 @@ docker run --rm --name rookhub-explorer-sync --user 1000:1000 --network rookhub-
 2. **Lichess**: jeder Monat ≥ `LICHESS_FROM`, der nicht in `state/lichess-imported.txt` steht, neueste
    zuerst: Download (fortsetzbar), sha256 gegen `sha256sums.txt`, gefilterter Import, Dump löschen.
 
-**Importzeiten:** Standard ist rund um die Uhr. Ein Monat (~28 Mio. Partien, ~27 GB DB) schreibt
+**Importzeiten:** Standard ist rund um die Uhr. Ein Monat (~28 Mio. Partien, ~24 GB DB) schreibt
 schneller, als RocksDB auf der HDD kompaktiert; während des Rückstands steigen die `/lichess`-Latenzen
 auf Sekunden (rookhub fängt das mit 30 s Timeout + Wiederholung ab). Wer Importe tagsüber pausieren
 will: `-e IMPORT_AVOID_UTC_HOURS="4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19"` (UTC-Stunden, hier
@@ -114,25 +114,34 @@ unerwarteter Lumbra-Link gilt als Fehler: Der Lauf endet mit „Sync fertig — 
 
 ## Neuaufbau
 
-Die RocksDB unter `db/` liegt in keinem Backup (`rookhub/scripts/backup-db.sh` sichert nur MariaDB).
-Ist sie weg, reicht `explorer-sync` allein **nicht**: Bei den Meistern holt der Sync nur „OTB
-partial“ des laufenden Jahres (im Januar zusätzlich das Vorjahr). Der historische Bestand stammt aus
-einem einmaligen Import von Lumbras „OTB Complete“; fehlt er, liefert `/masters` ohne jede
+Die RocksDB unter `db/` liegt in keinem Backup (`scripts/backup-db.sh` im rookhub-Repo sichert nur
+MariaDB). Ist sie weg, reicht `explorer-sync` allein **nicht**: Bei den Meistern holt der Sync nur
+„OTB partial“ des laufenden Jahres (im Januar zusätzlich das Vorjahr). Der historische Bestand stammt
+aus einem einmaligen Import von Lumbras „OTB Complete“; fehlt er, liefert `/masters` ohne jede
 Fehlermeldung nur Partien des laufenden Jahres. Reihenfolge (Zeiten gemessen beim Erstaufbau
 2026-09-22 bis 2026-09-28):
 
-1. **Leere DB:** Image bauen (siehe Betrieb), Datenverzeichnis für uid 1000 anlegen, Stack starten;
-   der Explorer legt `db/` beim Start selbst an.
+1. **Leere DB:** Image bauen (siehe Betrieb), Explorer stoppen (ein laufender hält die alte DB offen,
+   `docker compose up -d` allein ändert an ihm nichts), Datenverzeichnis für uid 1000 anlegen, Stack
+   starten; der Explorer legt `db/` beim Start selbst an. Ist das Datenverzeichnis noch da (nur `db/`
+   kaputt oder weg), zusätzlich `db/` löschen und `state/` beiseiteschieben: Sonst überspringt
+   `explorer-sync` in Schritt 3 jeden Lichess-Monat und jede Lumbra-Version, die in
+   `state/*-imported.txt` oder `state/*-rejected.txt` vermerkt ist, meldet trotzdem „Sync fertig“,
+   und `/lichess` bleibt leer. Läuft gerade ein Sync (`docker ps` zeigt `rookhub-explorer-sync`),
+   vorher `docker stop rookhub-explorer-sync`.
 
    ```sh
    d=/mnt/disks/sdf/rookhub-explorer
+   cd /opt/stacks/rookhub-explorer && docker compose stop explorer
+   # nur wenn das Datenverzeichnis noch da ist:
+   rm -rf "${d:?}/db" && mv "$d/state" "$d/state.alt"
    sudo install -d -o 1000 -g 1000 "$d" "$d/masters"
-   cd /opt/stacks/rookhub-explorer && docker compose up -d
+   docker compose up -d
    ```
 
 2. **Meister-Grundstock „OTB Complete“:** Quelle ist
    <https://lumbrasgigabase.com/en/download-in-pgn-format-en/>, Paket „OTB Complete“ (Slug
-   `otb-complete`, `LumbrasGigaBase_OTB_Complete.7z`, ~1,5 GB, entpackt 8,6 GB PGN). Der Knopf leitet
+   `otb-complete`, `LumbrasGigaBase_OTB_Complete.7z`, ~1,6 GB, entpackt 8,6 GB PGN). Der Knopf leitet
    auf einen MEGA-Link weiter, den `megatools` aus dem Image lädt (~6 min). Immer die aktuelle Fassung
    laden: Lumbra aktualisiert monatlich, und die Kopie in `masters/` (Stand 2026-07) liegt auf derselben
    Platte wie die DB. Eine vorhandene alte Kopie vorher löschen, `megatools` überschreibt nicht. Der
