@@ -61,6 +61,8 @@ done
   Indexiert werden (wie bei Lichess) die ersten 50 Halbzüge. Monate ab `LICHESS_FROM` (Standard 2025-01).
 - **masters**: Lumbra's GigaBase OTB (PGN, CC BY-NC-SA 4.0), Elo-Schnitt ≥ 2200 und ab 1952 (beides
   Regeln des Servers), alle Züge. IDs sind ein Inhalts-Hash → Re-Importe ergeben nur Dubletten.
+  Grundstock = einmaliger Import von „OTB Complete“ (siehe [Neuaufbau](#neuaufbau)), der Sync holt
+  danach nur das laufende Jahr.
 
 ## Nachimport
 
@@ -93,6 +95,60 @@ Zeile, davor die letzten Ablehnungen, alles in `sync.log`). Solche Monate bzw. L
 landen in `state/lichess-rejected.txt` bzw. `state/lumbra-rejected.txt` statt in `*-imported.txt`
 und werden nicht automatisch wiederholt (Zeile löschen = erneut importieren). Ein fehlender oder
 unerwarteter Lumbra-Link gilt als Fehler: Der Lauf endet mit „Sync fertig — mit Fehlern" und Exit 1.
+
+## Neuaufbau
+
+Die RocksDB unter `db/` liegt in keinem Backup (`rookhub/scripts/backup-db.sh` sichert nur MariaDB).
+Ist sie weg, reicht `explorer-sync` allein **nicht**: Bei den Meistern holt der Sync nur „OTB
+partial“ des laufenden Jahres (im Januar zusätzlich das Vorjahr). Der historische Bestand stammt aus
+einem einmaligen Import von Lumbras „OTB Complete“; fehlt er, liefert `/masters` ohne jede
+Fehlermeldung nur Partien des laufenden Jahres. Reihenfolge (Zeiten gemessen beim Erstaufbau
+2026-09-22 bis 2026-09-28):
+
+1. **Leere DB:** Image bauen (siehe Betrieb), Datenverzeichnis für uid 1000 anlegen, Stack starten;
+   der Explorer legt `db/` beim Start selbst an.
+
+   ```sh
+   d=/mnt/disks/sdf/rookhub-explorer
+   sudo install -d -o 1000 -g 1000 "$d" "$d/masters"
+   cd /opt/stacks/rookhub-explorer && docker compose up -d
+   ```
+
+2. **Meister-Grundstock „OTB Complete“:** Quelle ist
+   <https://lumbrasgigabase.com/en/download-in-pgn-format-en/>, Paket „OTB Complete“ (Slug
+   `otb-complete`, `LumbrasGigaBase_OTB_Complete.7z`, ~1,5 GB, entpackt 8,6 GB PGN). Der Knopf leitet
+   auf einen MEGA-Link weiter, den `megatools` aus dem Image lädt (~6 min). Immer die aktuelle Fassung
+   laden: Lumbra aktualisiert monatlich, und die Kopie in `masters/` (Stand 2026-07) liegt auf derselben
+   Platte wie die DB. Eine vorhandene alte Kopie vorher löschen, `megatools` überschreibt nicht. Der
+   Import streamt das Archiv, ohne es zu entpacken: 71 min, danach ~6,5 GB in `db/` (2026-09-22:
+   `imported: 3715729, duplicate: 51616, rejected: 0, skipped (filter/illegal): 6588143`).
+
+   ```sh
+   docker run --rm --user 1000:1000 -v /mnt/disks/sdf/rookhub-explorer:/data rookhub-explorer:latest \
+     megatools dl --no-progress --path /data/masters 'https://mega.nz/file/…'
+   docker run --rm --name rookhub-explorer-masters-import --user 1000:1000 \
+     --network rookhub-explorer_default -v /mnt/disks/sdf/rookhub-explorer:/data \
+     rookhub-explorer:latest bash -c 'set -o pipefail
+       7z x -so /data/masters/LumbrasGigaBase_OTB_Complete.7z \
+         | import-masters --endpoint http://rookhub-explorer:9002 /dev/stdin 2>&1 | tail -n 20'
+   ```
+
+   Die letzte Zeile ist die Zusammenfassung. Exit 3 heißt, der Server hat Partien abgelehnt (Gründe
+   stehen davor), jeder andere Exit ≠ 0 heißt abgebrochen: einfach wiederholen, bereits Importiertes
+   zählt dann nur als Dublette. Mit einer älteren Complete-Kopie fehlt, was Lumbra seit ihrem Stand
+   nachgetragen hat. Dann für jedes Jahr von ihrem Stand bis zum Vorjahr das Jahrespaket (z. B. „OTB
+   2025“) genauso importieren.
+
+3. **`explorer-sync`:** den Cron-Befehl aus [Nachimport](#nachimport) einmal von Hand starten (oder
+   auf 03:15 warten). „OTB partial“ ergibt jetzt fast nur Dubletten (2026-09-22:
+   `imported: 0, duplicate: 44400`), danach folgen die Lichess-Monate ab `LICHESS_FROM`, neueste
+   zuerst: je Monat 10 bis 60 min Download samt Prüfsumme und 3 bis 10 h Import, für 20 Monate
+   (2026-08 bis 2025-01) knapp 6 Tage.
+
+**Plattenbedarf** (Stand 2026-09-29): `db/` 491 GB, davon Meister ~6,5 GB und Lichess ~24 GB je Monat.
+Dazu kommen während des Syncs ein Monats-Dump (~30 GB, nach dem Import gelöscht) und die
+Complete-Datei (1,6 GB). Für den Stand bis 2025-01 also mindestens 550 GB frei, jeder weitere Monat
+braucht ~25 GB mehr.
 
 ## Änderungen gegenüber upstream
 
