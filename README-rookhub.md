@@ -16,21 +16,30 @@ ohne Token und ohne Rate-Limit. Genutzt vom Lochfinder in rookhub (`LichessExplo
 | Direkt | `http://rookhub-explorer:9002/` im Netz `rookhub-explorer_default` (Gateway, `explorer-sync`) |
 | Host | `http://127.0.0.1:9002/` (nur localhost, direkt) |
 
-Image bauen, im Fork-Checkout. Label und zweites Tag tragen den Git-Stand (`-dirty` = mit
-uncommitteten Änderungen gebaut):
+Image bauen, im Fork-Checkout. Label und zweites Tag tragen den Git-Stand, `-dirty-<Zeit>` = mit
+geänderten oder noch nicht eingecheckten Dateien gebaut (`COPY` nimmt beide mit). Die erste Zeile
+hält vorher das Image des laufenden Explorers als `:previous` fest, auch wenn es kein `:<rev>`-Tag
+hat (läuft keiner, meldet sie nur einen Fehler):
 
 ```sh
-rev=$(git rev-parse --short HEAD)$(git diff --quiet HEAD || echo -dirty)
+docker tag "$(docker container inspect -f '{{.Image}}' rookhub-explorer)" rookhub-explorer:previous
+rev=$(git rev-parse --short HEAD)
+test -z "$(git status --porcelain)" || rev="$rev-dirty-$(date +%Y%m%d%H%M)"
 docker build -f Dockerfile.rookhub --build-arg REVISION="$rev" \
   -t rookhub-explorer:latest -t "rookhub-explorer:$rev" .
 docker image inspect rookhub-explorer:latest \
   --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
 ```
 
-`:latest` wird bei jedem Build überschrieben, die `:<rev>`-Tags bleiben. Zurückschalten:
-`docker tag rookhub-explorer:<alter-rev> rookhub-explorer:latest`, dann in
-`/opt/stacks/rookhub-explorer/` `docker compose up -d explorer` (RocksDB-Neustart); der Cron-Sync
-nimmt ohnehin `:latest`. Alte Stände mit `docker image rm rookhub-explorer:<rev>` aufräumen.
+`:latest` wird bei jedem Build überschrieben, `:previous` zeigt danach auf das bis dahin laufende
+Image, die `:<rev>`-Tags bleiben. Zurückschalten: `docker tag rookhub-explorer:previous
+rookhub-explorer:latest` (oder `:<alter-rev>`), dann in `/opt/stacks/rookhub-explorer/`
+`docker compose up -d explorer` (RocksDB-Neustart); der Cron-Sync nimmt ohnehin `:latest`. Das Image
+vom 2026-09-23 hat weder Label noch `:<rev>`-Tag (Inhalt laut Hashvergleich = `401bd7b`): vor dem
+ersten Build nach dieser Anleitung einmal `docker tag rookhub-explorer:latest rookhub-explorer:401bd7b`,
+sonst hängt es nur an `:previous`, und das zeigt nach dem nächsten Build auf den dann laufenden
+Stand. Alte Stände zeigt `docker image ls rookhub-explorer`, aufräumen mit
+`docker image rm rookhub-explorer:<rev>`.
 
 Der Explorer hat keine Authentifizierung. Admin sind `/import/*`, `/compact` und auch `GET /player`
 (`/personal`): das lädt die ganze Partiehistorie beliebiger Lichess-Konten dauerhaft in die DB. Diese
