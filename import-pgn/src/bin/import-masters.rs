@@ -28,6 +28,10 @@ use shakmaty::{CastlingMode, Chess, Color, Position};
 /// `src/model/date.rs`).
 const MIN_YEAR: u16 = 1952;
 
+/// Exit code when all files were read, but the server rejected at least one
+/// game (clap already uses 2 for usage errors).
+const EXIT_REJECTED: i32 = 3;
+
 #[derive(Serialize)]
 struct Player {
     name: String,
@@ -316,5 +320,8 @@ fn main() -> Result<(), io::Error> {
         counts.rejected.load(Ordering::Relaxed),
         skipped
     );
+    if counts.rejected.load(Ordering::Relaxed) > 0 {
+        std::process::exit(EXIT_REJECTED);
+    }
     Ok(())
 }

@@ -88,6 +88,12 @@ will: `-e IMPORT_AVOID_UTC_HOURS="4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19"` (U
 Alles idempotent; `flock` + fester Containername verhindern parallele Läufe. Einen Monat erneut
 importieren: Zeile aus `state/lichess-imported.txt` löschen. Weiter zurück: `-e LICHESS_FROM=2024-01`.
 
+Die Importer enden mit Exit 3, wenn der Server Partien abgelehnt hat (Zusammenfassung als letzte
+Zeile, davor die letzten Ablehnungen, alles in `sync.log`). Solche Monate bzw. Lumbra-Versionen
+landen in `state/lichess-rejected.txt` bzw. `state/lumbra-rejected.txt` statt in `*-imported.txt`
+und werden nicht automatisch wiederholt (Zeile löschen = erneut importieren). Ein fehlender oder
+unerwarteter Lumbra-Link gilt als Fehler: Der Lauf endet mit „Sync fertig — mit Fehlern" und Exit 1.
+
 ## Änderungen gegenüber upstream
 
 - `import-pgn/src/bin/import-lichess.rs`: Filter `--min-avg-rating`, `--exclude-speed`.

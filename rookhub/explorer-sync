@@ -10,6 +10,11 @@
 #
 # Der Import ist idempotent (Lichess: Partie-ID, Meister: Inhalts-Hash), ein abgebrochener Lauf
 # darf also einfach wiederholt werden. flock verhindert parallele Läufe.
+#
+# Exit-Codes der Importer: 0 = sauber (-> state/*-imported.txt), 3 = durchgelaufen, aber der
+# Server hat Partien abgelehnt (-> state/*-rejected.txt, Gründe und Zählwerte im Log; das sind
+# Datenfehler, ein Neuversuch lehnt dieselben Partien wieder ab und hielte jede Nacht die älteren
+# Monate auf), alles andere = Fehler, der nächste Lauf versucht es erneut.
 set -euo pipefail
 
 DATA=${DATA:-/data}
@@ -24,7 +29,7 @@ IMPORT_AVOID_UTC_HOURS=${IMPORT_AVOID_UTC_HOURS-}
 STATE=$DATA/state
 DUMPS=$DATA/dumps
 mkdir -p "$STATE" "$DUMPS" "$DATA/masters"
-touch "$STATE/lichess-imported.txt"
+touch "$STATE/lichess-imported.txt" "$STATE/lichess-rejected.txt"
 
 exec 9>"$STATE/sync.lock"
 if ! flock -n 9; then
@@ -45,7 +50,7 @@ sync_lichess() {
         local month=${file#lichess_db_standard_rated_}
         month=${month%.pgn.zst}
         [[ $month < $LICHESS_FROM ]] && continue
-        grep -qx "$month" "$STATE/lichess-imported.txt" && continue
+        grep -qx "$month" "$STATE/lichess-imported.txt" "$STATE/lichess-rejected.txt" && continue
 
         if [[ ! -f $DUMPS/$file ]]; then
             log "Lichess $month: Download"
@@ -65,13 +70,18 @@ sync_lichess() {
         local avoid=() h
         for h in $IMPORT_AVOID_UTC_HOURS; do avoid+=(--avoid-utc-hour "$h"); done
         log "Lichess $month: Import (Schnitt >= $LICHESS_MIN_AVG, ohne Bullet, Pause UTC-Stunden: ${IMPORT_AVOID_UTC_HOURS:-keine})"
-        if ! import-lichess --endpoint "$ENDPOINT" --min-avg-rating "$LICHESS_MIN_AVG" \
+        # Letzte Zeile = Zusammenfassung, davor die letzten abgelehnten Batches.
+        local rc=0
+        import-lichess --endpoint "$ENDPOINT" --min-avg-rating "$LICHESS_MIN_AVG" \
             --exclude-speed bullet --exclude-speed ultraBullet "${avoid[@]}" "$DUMPS/$file" \
-            | sed '/paused around this time/d' | tr '\r' '\n' | tail -1; then
-            log "Lichess $month: Import fehlgeschlagen — nächster Lauf versucht es erneut"
-            return 1
-        fi
-        echo "$month" >> "$STATE/lichess-imported.txt"
+            | sed '/paused around this time/d' | tr '\r' '\n' | tail -n 20 || rc=$?
+        case $rc in
+            0) echo "$month" >> "$STATE/lichess-imported.txt" ;;
+            3) log "Lichess $month: Server hat Batches abgelehnt (siehe oben) — vermerkt in lichess-rejected.txt"
+               echo "$month" >> "$STATE/lichess-rejected.txt" ;;
+            *) log "Lichess $month: Import fehlgeschlagen (Exit $rc) — nächster Lauf versucht es erneut"
+               return 1 ;;
+        esac
         rm -f "$DUMPS/$file"
         log "Lichess $month: fertig"
     done
@@ -90,9 +100,11 @@ lumbra_mega_link() {
 
 import_lumbra() {
     local slug=$1 link file
-    link=$(lumbra_mega_link "$slug") || { log "Lumbra $slug: kein Link gefunden"; return 0; }
-    [[ $link == https://mega.nz/* ]] || { log "Lumbra $slug: unerwarteter Link $link"; return 0; }
-    if grep -qxF "$link" "$STATE/lumbra-imported.txt" 2>/dev/null; then
+    # Kein/unerwarteter Link heißt meist: Lumbra hat die Seite umgebaut — Fehler, sonst veraltet
+    # die Meister-Datenbank still.
+    link=$(lumbra_mega_link "$slug") || { log "Lumbra $slug: kein Link gefunden"; return 1; }
+    [[ $link == https://mega.nz/* ]] || { log "Lumbra $slug: unerwarteter Link $link"; return 1; }
+    if grep -qsxF "$link" "$STATE/lumbra-imported.txt" "$STATE/lumbra-rejected.txt"; then
         return 0
     fi
     log "Lumbra $slug: neue Version, Download"
@@ -102,28 +114,41 @@ import_lumbra() {
     file=$(ls "$DATA/masters/tmp"/*.7z 2>/dev/null | head -1)
     [[ -n $file ]] || { log "Lumbra $slug: kein .7z im Download"; return 1; }
     log "Lumbra $slug: Import $(basename "$file")"
-    if ! 7z x -so "$file" 2>/dev/null | import-masters --endpoint "$ENDPOINT" /dev/stdin 2>/dev/null | tail -1; then
-        log "Lumbra $slug: Import fehlgeschlagen"
-        return 1
-    fi
-    echo "$link" >> "$STATE/lumbra-imported.txt"
+    # stderr von import-masters (abgelehnte Partien, Panics) mit in die gekürzte Ausgabe, letzte
+    # Zeile = Zusammenfassung; stderr von 7z direkt ins Log.
+    local st
+    7z x -so "$file" | import-masters --endpoint "$ENDPOINT" /dev/stdin 2>&1 | tail -n 20 \
+        && st=(0 0 0) || st=("${PIPESTATUS[@]}")
+    case "${st[*]}" in
+        "0 0 0") echo "$link" >> "$STATE/lumbra-imported.txt" ;;
+        "0 3 0") log "Lumbra $slug: Server hat Partien abgelehnt (siehe oben) — vermerkt in lumbra-rejected.txt"
+                 echo "$link" >> "$STATE/lumbra-rejected.txt" ;;
+        *) log "Lumbra $slug: Import fehlgeschlagen (Exit 7z/import-masters/tail: ${st[*]})"
+           return 1 ;;
+    esac
     rm -rf "$DATA/masters/tmp"
     log "Lumbra $slug: fertig"
 }
 
 sync_masters() {
-    local year
+    local year rc=0
     year=$(date +%Y)
-    import_lumbra "otb-partial-$year" || return 1
+    # Ein Fehler beim laufenden Jahr (z. B. kein Link) hält das Vorjahr nicht auf.
+    import_lumbra "otb-partial-$year" || rc=1
     # Im Januar kann das Vorjahr noch einen Nachtrag bekommen haben.
-    if [[ $(date +%m) == 01 ]]; then import_lumbra "otb-$((year - 1))" || return 1; fi
-    return 0
+    if [[ $(date +%m) == 01 ]]; then import_lumbra "otb-$((year - 1))" || rc=1; fi
+    return $rc
 }
 
+failed=0
 case "${1:-all}" in
     lichess) sync_lichess ;;
     masters) sync_masters ;;
-    all) sync_masters || log "Meister-Sync fehlgeschlagen — weiter mit Lichess"; sync_lichess ;;
+    all) sync_masters || { failed=1; log "Meister-Sync fehlgeschlagen — weiter mit Lichess"; }; sync_lichess ;;
     *) echo "usage: explorer-sync [all|lichess|masters]"; exit 2 ;;
 esac
+if (( failed )); then
+    log "Sync fertig — mit Fehlern (siehe oben)"
+    exit 1
+fi
 log "Sync fertig"

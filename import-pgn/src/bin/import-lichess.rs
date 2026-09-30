@@ -8,6 +8,11 @@ use serde_with::{DisplayFromStr, StringWithSeparator, formats::SpaceSeparator, s
 use shakmaty::Color;
 use time::OffsetDateTime;
 
+/// Exit code when all files were read, but the server rejected at least one
+/// batch (clap already uses 2 for usage errors). The server stops a batch at
+/// the first bad game, so the rest of that batch is missing as well.
+const EXIT_REJECTED: i32 = 3;
+
 #[derive(Debug, Serialize, Copy, Clone)]
 #[serde(rename_all = "camelCase")]
 enum Speed {
@@ -251,6 +256,13 @@ impl Visitor for Importer<'_> {
     }
 }
 
+#[derive(Default)]
+struct Counts {
+    games: u64,
+    rejected_batches: u64,
+    rejected_games: u64,
+}
+
 #[derive(Parser)]
 struct Args {
     #[arg(long, default_value = "http://localhost:9002")]
@@ -282,6 +294,7 @@ fn main() -> Result<(), io::Error> {
             .timeout(None)
             .build()
             .expect("client");
+        let mut counts = Counts::default();
 
         while let Ok(batch) = rx.recv() {
             while args
@@ -298,7 +311,10 @@ fn main() -> Result<(), io::Error> {
                 .send()
                 .expect("send batch");
 
+            counts.games += batch.games.len() as u64;
             if !res.status().is_success() {
+                counts.rejected_batches += 1;
+                counts.rejected_games += batch.games.len() as u64;
                 println!(
                     "{:?}: {}: {} - {}",
                     batch.filename,
@@ -308,6 +324,7 @@ fn main() -> Result<(), io::Error> {
                 );
             }
         }
+        counts
     });
 
     for arg in args.pgns {
@@ -343,6 +360,13 @@ fn main() -> Result<(), io::Error> {
     }
 
     drop(tx);
-    bg.join().expect("bg join");
+    let counts = bg.join().expect("bg join");
+    println!(
+        "games sent: {}, rejected batches: {} ({} games)",
+        counts.games, counts.rejected_batches, counts.rejected_games
+    );
+    if counts.rejected_batches > 0 {
+        std::process::exit(EXIT_REJECTED);
+    }
     Ok(())
 }
