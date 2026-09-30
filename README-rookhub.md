@@ -11,10 +11,26 @@ ohne Token und ohne Rate-Limit. Genutzt vom Lochfinder in rookhub (`LichessExplo
 | Stack | `/opt/stacks/rookhub-explorer/` = `rookhub/compose.yaml` + `rookhub/explorer-gateway.conf` (Container `rookhub-explorer`, `rookhub-explorer-gateway`) |
 | Cache | 3 GiB RocksDB-Block-Cache (`--db-cache`, 2026-09-23 von 6 GiB gesenkt: Host hat 47 GB für alle Dienste) |
 | Daten | `/mnt/disks/sdf/rookhub-explorer/` — `db/` (RocksDB), `dumps/`, `masters/`, `state/`, `sync.log` |
-| Image | `rookhub-explorer:latest`, lokal gebaut: `docker build -f Dockerfile.rookhub -t rookhub-explorer:latest .` |
+| Image | `rookhub-explorer:latest` plus `rookhub-explorer:<rev>` je Build, lokal gebaut (siehe unten) |
 | rookhub-Netze | `http://rookhub-explorer:9002/` in `rookhub-schach_rookhub` und `rookhub-schach-dev_rookhub-dev` = der **Gateway** (Alias), nur `GET /lichess` und `GET /masters`, alles andere 403 |
 | Direkt | `http://rookhub-explorer:9002/` im Netz `rookhub-explorer_default` (Gateway, `explorer-sync`) |
 | Host | `http://127.0.0.1:9002/` (nur localhost, direkt) |
+
+Image bauen, im Fork-Checkout. Label und zweites Tag tragen den Git-Stand (`-dirty` = mit
+uncommitteten Änderungen gebaut):
+
+```sh
+rev=$(git rev-parse --short HEAD)$(git diff --quiet HEAD || echo -dirty)
+docker build -f Dockerfile.rookhub --build-arg REVISION="$rev" \
+  -t rookhub-explorer:latest -t "rookhub-explorer:$rev" .
+docker image inspect rookhub-explorer:latest \
+  --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+```
+
+`:latest` wird bei jedem Build überschrieben, die `:<rev>`-Tags bleiben. Zurückschalten:
+`docker tag rookhub-explorer:<alter-rev> rookhub-explorer:latest`, dann in
+`/opt/stacks/rookhub-explorer/` `docker compose up -d explorer` (RocksDB-Neustart); der Cron-Sync
+nimmt ohnehin `:latest`. Alte Stände mit `docker image rm rookhub-explorer:<rev>` aufräumen.
 
 Der Explorer hat keine Authentifizierung. Admin sind `/import/*`, `/compact` und auch `GET /player`
 (`/personal`): das lädt die ganze Partiehistorie beliebiger Lichess-Konten dauerhaft in die DB. Diese

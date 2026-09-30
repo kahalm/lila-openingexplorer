@@ -23,6 +23,10 @@ RUN curl -fsSL https://xff.cz/megatools/builds/builds/megatools-1.11.5.20250706-
     | tar xz -C /tmp && mv /tmp/megatools-*/megatools /usr/local/bin/ && rm -rf /tmp/megatools-*
 COPY --from=build /out/ /usr/local/bin/
 COPY rookhub/ /usr/local/bin/
+# Git-Stand des Builds (Buildbefehl in README-rookhub.md). Erst hier, damit ein neuer Stand keine
+# der Schichten davor neu baut.
+ARG REVISION=unknown
+LABEL org.opencontainers.image.revision=$REVISION
 ENV EXPLORER_LOG=lila_openingexplorer=info
 EXPOSE 9002
 CMD ["lila-openingexplorer", "--bind", "0.0.0.0:9002"]
