@@ -192,3 +192,27 @@ braucht ~25 GB mehr.
   der Abruf alle 5 s mit 401 fehl).
 - `Cargo.toml`: rocksdb ohne `io-uring` (Docker blockiert io_uring per seccomp).
 - `Dockerfile.rookhub`, `rookhub/explorer-sync`, `rookhub/explorer-gateway.conf`, diese Datei.
+
+## Spielerindex (Nebenleser, seit 2026-10-09)
+
+Der Explorer behält je Stellung nur Zähler und die letzten 8 Partien, `explorer-sync` löscht den
+Dump nach dem Import. Für „Konto anhand von Partien finden“ hält `rookhub/player-index/` je Partie
+Spieler, Wertungen, Tempo, Ergebnis, Bedenkzeit und die ersten 24 Halbzüge fest, dazu Hashes der
+Zugfolge nach 8/12/16/20/24 Halbzügen (blake2b, 8 Byte). Ohne Bullet/UltraBullet, ohne Wertungsfilter.
+
+| Was | Wo |
+|---|---|
+| Daten | `/mnt/disks/sdf/rookhub-explorer/player-index/parquet/<Monat>.parquet` (~5 GB/Monat) |
+| Stand | `player-index/state/indexed.txt`, Log `player-index/index.log` |
+| Installiert | `~/claude/player-index/` (Kopie von Skript + Hülle, venv mit pyarrow/zstandard/duckdb) |
+| Cron | `*/10 * * * * $HOME/claude/player-index/player-index-run` |
+
+Ablauf: fertige Dumps in `dumps/` werden nach `player-index/inbox/` hart verlinkt (kein zweiter
+Download, der Explorer darf sie weiter löschen); Monate, die der Explorer schon vor dem Index gelöscht
+hat, lädt der Index selbst nach (höchstens 2 Dumps gleichzeitig vorrätig). sha256 läuft beim Lesen mit.
+Ab `PLAYER_INDEX_FROM` (Standard 2024-01). Nach Änderung am Skript: beide Dateien nach
+`~/claude/player-index/` kopieren. Abfrage z. B.:
+
+```sh
+~/claude/player-index/.venv/bin/python -c "import duckdb; print(duckdb.sql(\"select count(*) from '/mnt/disks/sdf/rookhub-explorer/player-index/parquet/*.parquet' where white='kahalm' or black='kahalm'\"))"
+```

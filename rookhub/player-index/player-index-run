@@ -1,0 +1,6 @@
+#!/bin/bash
+# Cron-Hülle (Host, User kahalm, alle 10 min). Installierte Kopie: ~/claude/player-index/.
+# Niedrige CPU-/IO-Priorität, damit Explorer-Import und -Kompaktierung Vorrang behalten.
+D=${PLAYER_INDEX_DATA:-/mnt/disks/sdf/rookhub-explorer/player-index}
+mkdir -p "$D"
+exec nice -n 15 ionice -c2 -n7 "$HOME/claude/player-index/.venv/bin/python" -I "$HOME/claude/player-index/player-index.py" "$@" >> "$D/index.log" 2>&1
