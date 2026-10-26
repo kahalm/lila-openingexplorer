@@ -1,5 +1,8 @@
 # RookHub-Build des Lichess-Opening-Explorers: Server + Import-Werkzeuge in einem schlanken Image.
-FROM rust:1-trixie AS build
+# Basis-Images per Digest gepinnt (Stand 2026-10-26, Multi-Arch-Index-Digest aus
+# `docker buildx imagetools inspect <image>`); erneuern siehe README-rookhub.md „Basis-Images“.
+# rust:1-trixie
+FROM rust:1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
 RUN apt-get update && apt-get install -y --no-install-recommends libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
@@ -14,13 +17,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/lila-openingexplorer import-pgn/target/release/import-lichess \
           import-pgn/target/release/import-masters /out/
 
-FROM debian:trixie-slim
+# debian:trixie-slim
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+# megatools für die Lumbra-Downloads von MEGA aus dem Debian-Paket (trixie: 1.11.5, signiertes
+# Archiv) statt `curl | tar` eines Fremd-Tarballs ohne Prüfsumme; /usr/bin/megatools (`megatools dl`).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl libssl3 zstd 7zip \
+        ca-certificates curl libssl3 zstd 7zip megatools \
     && rm -rf /var/lib/apt/lists/*
-# megatools (statisch) für die Lumbra-Downloads von MEGA
-RUN curl -fsSL https://xff.cz/megatools/builds/builds/megatools-1.11.5.20250706-linux-x86_64.tar.gz \
-    | tar xz -C /tmp && mv /tmp/megatools-*/megatools /usr/local/bin/ && rm -rf /tmp/megatools-*
 COPY --from=build /out/ /usr/local/bin/
 COPY rookhub/ /usr/local/bin/
 # Git-Stand des Builds (Buildbefehl in README-rookhub.md). Erst hier, damit ein neuer Stand keine

@@ -41,6 +41,21 @@ sonst hängt es nur an `:previous`, und das zeigt nach dem nächsten Build auf d
 Stand. Alte Stände zeigt `docker image ls rookhub-explorer`, aufräumen mit
 `docker image rm rookhub-explorer:<rev>`.
 
+### Basis-Images
+
+`Dockerfile.rookhub` pinnt `rust:1-trixie` und `debian:trixie-slim` per Digest (Kommentar mit
+Datum darüber); ein Build zieht damit nie still ein anderes Image. Sicherheitsupdates kommen erst
+mit einem neuen Digest — etwa monatlich oder bei einem Debian-/Rust-Sicherheitshinweis erneuern:
+
+```sh
+docker buildx imagetools inspect rust:1-trixie      | awk '/^Digest:/{print $2}'
+docker buildx imagetools inspect debian:trixie-slim | awk '/^Digest:/{print $2}'
+```
+
+Die Werte (Multi-Arch-Index-Digest) in die beiden `FROM …@sha256:…`-Zeilen eintragen, Datum im
+Kommentar anpassen, neu bauen (oben). `megatools` kommt aus dem Debian-Paket (trixie: 1.11.5) und
+wandert mit dem Basis-Image mit; kein Download eines Fremd-Tarballs mehr.
+
 Der Explorer hat keine Authentifizierung. Admin sind `/import/*`, `/compact` und auch `GET /player`
 (`/personal`): das lädt die ganze Partiehistorie beliebiger Lichess-Konten dauerhaft in die DB. Diese
 Routen (und `/monitor`) erreichen nur localhost und das Netz `rookhub-explorer_default`; die
@@ -191,7 +206,7 @@ braucht ~25 GB mehr.
 - `src/main.rs`/`src/lila.rs`: Spieler-Blacklist nur mit Lichess-Token abfragen (ohne Token schlug
   der Abruf alle 5 s mit 401 fehl).
 - `Cargo.toml`: rocksdb ohne `io-uring` (Docker blockiert io_uring per seccomp).
-- `Dockerfile.rookhub`, `rookhub/explorer-sync`, `rookhub/explorer-gateway.conf`, diese Datei.
+- `Dockerfile.rookhub` (Basis-Images per Digest, megatools aus Debian), `rookhub/explorer-sync`, `rookhub/explorer-gateway.conf`, diese Datei.
 
 ## Spielerindex (Nebenleser, seit 2026-10-09)
 
