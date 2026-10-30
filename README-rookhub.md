@@ -110,13 +110,22 @@ Cron (User `kahalm`), täglich 03:15:
 
 ```sh
 docker run --rm --name rookhub-explorer-sync --user 1000:1000 --network rookhub-explorer_default \
-  -v /mnt/disks/sdf/rookhub-explorer:/data rookhub-explorer:latest explorer-sync
+  -v /mnt/disks/sdf/rookhub-explorer:/data \
+  -v /srv/media/sftp/kahalm2/dumps:/drop:ro -e LUMBRA_DROP=/drop rookhub-explorer:latest explorer-sync
 ```
 
 `rookhub/explorer-sync` (im Image unter `/usr/local/bin`):
 
-1. **Meister**: prüft, ob Lumbra „OTB partial <Jahr>" eine neue Version hat (MEGA-Link geändert),
-   lädt sie per `megatools` und importiert sie. Im Januar zusätzlich das Vorjahr.
+1. **Meister**: spielt jedes OTB-Paket ein, das im Eingang liegt (`masters/inbox/*.7z`, nach dem
+   Import gelöscht, und `LUMBRA_DROP/*.7z`, nur lesend, bleibt liegen). Jede Datei (sha256) nur einmal,
+   Namen mit „Online“ oder ohne „OTB“ werden übersprungen. Danach liest es die Versionsdaten von
+   „OTB partial <Jahr>" (im Januar zusätzlich „OTB <Vorjahr>") auf der Download-Seite und meldet im
+   Log `NEUE VERSION <Datum>`, bis das passende Paket eingespielt ist (`state/lumbra-seen.txt`).
+   **Laden muss ein Mensch:** Seit 2026-10 gibt Lumbra Dateien nur noch über den Download-Bereich
+   <https://lumbrasgigabase.com/en/download-area-en/> heraus, mit einer Rechenaufgabe im Browser und
+   einer Lizenz-Zustimmung. Das wird bewusst nicht automatisiert. Paket im Browser laden und in den
+   SFTP-Drop-Ordner (`dumps/`) oder nach `/mnt/disks/sdf/rookhub-explorer/masters/inbox/` legen, der
+   nächste Lauf spielt es ein (sofort: `explorer-sync masters`).
 2. **Lichess**: jeder Monat ≥ `LICHESS_FROM`, der nicht in `state/lichess-imported.txt` steht, neueste
    zuerst: Download (fortsetzbar), sha256 gegen `sha256sums.txt`, gefilterter Import, Dump löschen.
 
@@ -133,8 +142,10 @@ importieren: Zeile aus `state/lichess-imported.txt` löschen. Weiter zurück: `-
 Die Importer enden mit Exit 3, wenn der Server Partien abgelehnt hat (Zusammenfassung als letzte
 Zeile, davor die letzten Ablehnungen, alles in `sync.log`). Solche Monate bzw. Lumbra-Versionen
 landen in `state/lichess-rejected.txt` bzw. `state/lumbra-rejected.txt` statt in `*-imported.txt`
-und werden nicht automatisch wiederholt (Zeile löschen = erneut importieren). Ein fehlender oder
-unerwarteter Lumbra-Link gilt als Fehler: Der Lauf endet mit „Sync fertig — mit Fehlern" und Exit 1.
+und werden nicht automatisch wiederholt (Zeile löschen = erneut importieren). Ein gescheiterter
+Lumbra-Import oder eine Download-Seite ohne Versionsangabe gilt als Fehler: Der Lauf endet mit „Sync
+fertig — mit Fehlern" und Exit 1. Eine neue, noch nicht geladene Version ist kein Fehler, nur eine
+Meldung.
 
 ## Neuaufbau
 
@@ -163,18 +174,16 @@ Fehlermeldung nur Partien des laufenden Jahres. Reihenfolge (Zeiten gemessen bei
    docker compose up -d
    ```
 
-2. **Meister-Grundstock „OTB Complete“:** Quelle ist
-   <https://lumbrasgigabase.com/en/download-in-pgn-format-en/>, Paket „OTB Complete“ (Slug
-   `otb-complete`, `LumbrasGigaBase_OTB_Complete.7z`, ~1,6 GB, entpackt 8,6 GB PGN). Der Knopf leitet
-   auf einen MEGA-Link weiter, den `megatools` aus dem Image lädt (~6 min). Immer die aktuelle Fassung
-   laden: Lumbra aktualisiert monatlich, und die Kopie in `masters/` (Stand 2026-07) liegt auf derselben
-   Platte wie die DB. Eine vorhandene alte Kopie vorher löschen, `megatools` überschreibt nicht. Der
+2. **Meister-Grundstock „OTB Complete“:** Quelle ist der Download-Bereich
+   <https://lumbrasgigabase.com/en/download-area-en/>, Paket „OTB Complete“
+   (`LumbrasGigaBase_OTB_Complete.7z`, ~2,4 GB, entpackt ~9 GB PGN). Im Browser laden (Rechenaufgabe +
+   Lizenz-Zustimmung, siehe oben) und nach `masters/` legen. Immer die aktuelle Fassung laden: Lumbra
+   aktualisiert monatlich, und die Kopie in `masters/` (Stand 2026-07) liegt auf derselben Platte wie
+   die DB. Nicht in den Eingang legen, der nimmt nur Jahres- und Teilpakete in den Nachtlauf. Der
    Import streamt das Archiv, ohne es zu entpacken: 71 min, danach ~6,5 GB in `db/` (2026-09-22:
    `imported: 3715729, duplicate: 51616, rejected: 0, skipped (filter/illegal): 6588143`).
 
    ```sh
-   docker run --rm --user 1000:1000 -v /mnt/disks/sdf/rookhub-explorer:/data rookhub-explorer:latest \
-     megatools dl --no-progress --path /data/masters 'https://mega.nz/file/…'
    docker run --rm --name rookhub-explorer-masters-import --user 1000:1000 \
      --network rookhub-explorer_default -v /mnt/disks/sdf/rookhub-explorer:/data \
      rookhub-explorer:latest bash -c 'set -o pipefail

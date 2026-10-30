@@ -5,8 +5,8 @@
 #  1. Lichess: jeden Monats-Dump von database.lichess.org, der neuer als LICHESS_FROM ist und noch
 #     nicht importiert wurde (neueste zuerst): laden, sha256 prüfen, gefiltert importieren
 #     (Elo-Schnitt >= LICHESS_MIN_AVG, ohne Bullet/UltraBullet), Dump löschen.
-#  2. Meister: Lumbra's GigaBase „OTB partial <Jahr>" (monatlich aktualisiert) — nur wenn sich die
-#     Datei geändert hat. Dubletten erkennt der Server (inhaltsbasierte IDs).
+#  2. Meister: Lumbra's GigaBase — spielt OTB-Pakete aus dem Eingang ein und meldet eine neue Version
+#     (Download nur noch im Browser, siehe README). Dubletten erkennt der Server (inhaltsbasierte IDs).
 #
 # Der Import ist idempotent (Lichess: Partie-ID, Meister: Inhalts-Hash), ein abgebrochener Lauf
 # darf also einfach wiederholt werden. flock verhindert parallele Läufe.
@@ -88,55 +88,106 @@ sync_lichess() {
 }
 
 # ---------------------------------------------------------------- Meister (Lumbra)
-lumbra_mega_link() {
-    # Download-Seite → wpdm-Link des Pakets (mit frischem refresh-Token) → Weiterleitung auf MEGA.
-    local slug=$1 page wpdm
-    page=$(curl -fsSL -A 'Mozilla/5.0' https://lumbrasgigabase.com/en/download-in-pgn-format-en/)
-    wpdm=$(grep -o -E "data-downloadurl=\"https://lumbrasgigabase.com/download/$slug/[^\"]*\"" <<< "$page" \
-        | head -1 | sed -e 's/data-downloadurl="//' -e 's/"$//' -e 's/&#038;/\&/g')
-    [[ -n $wpdm ]] || return 1
-    curl -fsS -o /dev/null -A 'Mozilla/5.0' -w '%{redirect_url}' "$wpdm"
+# Seit 2026-10 gibt Lumbra Downloads nur noch über einen Download-Bereich mit Rechenaufgabe im Browser
+# heraus (Plugin lgb-download, Proof-of-Work + Lizenz-Zustimmung) — das automatisiert dieses Skript
+# bewusst NICHT. Es liest nur die öffentliche Seite, meldet eine neue Version und spielt ein, was
+# ein Mensch im Browser geladen und in den Eingang gelegt hat:
+#   $DATA/masters/inbox/   (Host: /mnt/disks/sdf/rookhub-explorer/masters/inbox) — Datei wird nach
+#                          erfolgreichem Import gelöscht
+#   $LUMBRA_DROP           (optional, nur lesend eingehängt, z. B. der SFTP-Drop-Ordner) — bleibt liegen
+# Genommen werden nur OTB-Pakete (*OTB*.7z ohne „Online"); dieselbe Datei (sha256) nie zweimal.
+LUMBRA_AREA=${LUMBRA_AREA:-https://lumbrasgigabase.com/en/download-area-en/}
+LUMBRA_INBOX=$DATA/masters/inbox
+LUMBRA_DROP=${LUMBRA_DROP-}
+mkdir -p "$LUMBRA_INBOX"
+touch "$STATE/lumbra-imported.txt" "$STATE/lumbra-rejected.txt" "$STATE/lumbra-seen.txt"
+
+# „OTB partial 2026" → „2026-10-20" (Versionsdatum auf der Download-Seite), leer wenn nicht gefunden.
+lumbra_version() {
+    local title=$1
+    curl -fsSL -A 'Mozilla/5.0' "$LUMBRA_AREA" \
+        | sed -e 's/<[^>]*>/ /g' | tr -s ' \n\t\r' ' ' \
+        | grep -o -E "$title Version: [0-9]{4}-[0-9]{2}-[0-9]{2}" | head -1 | sed 's/.*Version: //'
 }
 
-import_lumbra() {
-    local slug=$1 link file
-    # Kein/unerwarteter Link heißt meist: Lumbra hat die Seite umgebaut — Fehler, sonst veraltet
-    # die Meister-Datenbank still.
-    link=$(lumbra_mega_link "$slug") || { log "Lumbra $slug: kein Link gefunden"; return 1; }
-    [[ $link == https://mega.nz/* ]] || { log "Lumbra $slug: unerwarteter Link $link"; return 1; }
-    if grep -qsxF "$link" "$STATE/lumbra-imported.txt" "$STATE/lumbra-rejected.txt"; then
+# Meldet, ob Lumbra eine Version anbietet, die noch nicht eingespielt ist. Kein Fehler — der Download
+# braucht einen Menschen; die Meldung steht jede Nacht im Log, bis die Datei im Eingang lag.
+check_lumbra() {
+    local title=$1 version
+    version=$(lumbra_version "$title") || true
+    if [[ -z $version ]]; then
+        log "Lumbra „$title“: keine Version auf $LUMBRA_AREA gefunden (Seite umgebaut?)"
+        return 1
+    fi
+    if grep -qsxF "$title@$version" "$STATE/lumbra-seen.txt"; then
         return 0
     fi
-    log "Lumbra $slug: neue Version, Download"
-    rm -rf "$DATA/masters/tmp" && mkdir -p "$DATA/masters/tmp"
-    # Fehler hier explizit prüfen: sync_masters läuft in einer ||-Liste, dort greift set -e nicht.
-    megatools dl --no-progress --path "$DATA/masters/tmp" "$link" || { log "Lumbra $slug: Download fehlgeschlagen"; return 1; }
-    file=$(ls "$DATA/masters/tmp"/*.7z 2>/dev/null | head -1)
-    [[ -n $file ]] || { log "Lumbra $slug: kein .7z im Download"; return 1; }
-    log "Lumbra $slug: Import $(basename "$file")"
-    # stderr von import-masters (abgelehnte Partien, Panics) mit in die gekürzte Ausgabe, letzte
-    # Zeile = Zusammenfassung; stderr von 7z direkt ins Log.
-    local st
+    log "Lumbra „$title“: NEUE VERSION $version — bitte im Browser laden ($LUMBRA_AREA)" \
+        "und nach masters/inbox/ legen${LUMBRA_DROP:+ oder in den Drop-Ordner}"
+}
+
+# Eine Datei einspielen. Exit 0 = eingespielt oder schon bekannt, 1 = Fehler.
+import_lumbra_file() {
+    local file=$1 sum st
+    sum=$(sha256sum "$file" | cut -d' ' -f1)
+    if grep -qsx "$sum.*" "$STATE/lumbra-imported.txt" "$STATE/lumbra-rejected.txt"; then
+        return 0
+    fi
+    log "Lumbra: Import $(basename "$file")"
     7z x -so "$file" | import-masters --endpoint "$ENDPOINT" /dev/stdin 2>&1 | tail -n 20 \
         && st=(0 0 0) || st=("${PIPESTATUS[@]}")
     case "${st[*]}" in
-        "0 0 0") echo "$link" >> "$STATE/lumbra-imported.txt" ;;
-        "0 3 0") log "Lumbra $slug: Server hat Partien abgelehnt (siehe oben) — vermerkt in lumbra-rejected.txt"
-                 echo "$link" >> "$STATE/lumbra-rejected.txt" ;;
-        *) log "Lumbra $slug: Import fehlgeschlagen (Exit 7z/import-masters/tail: ${st[*]})"
+        "0 0 0") echo "$sum $(basename "$file")" >> "$STATE/lumbra-imported.txt" ;;
+        "0 3 0") log "Lumbra: Server hat Partien abgelehnt (siehe oben) — vermerkt in lumbra-rejected.txt"
+                 echo "$sum $(basename "$file")" >> "$STATE/lumbra-rejected.txt" ;;
+        *) log "Lumbra: Import $(basename "$file") fehlgeschlagen (Exit 7z/import-masters/tail: ${st[*]})"
            return 1 ;;
     esac
-    rm -rf "$DATA/masters/tmp"
-    log "Lumbra $slug: fertig"
+    log "Lumbra: $(basename "$file") fertig"
+}
+
+# Passt ein Dateiname zum Paket? „OTB partial 2026" ↔ LumbrasGigaBase_OTB_2026_partial_release.7z,
+# „OTB 2025" ↔ LumbrasGigaBase_OTB_2025.7z (ohne „partial").
+lumbra_matches() {
+    local title=${1,,} name=${2,,} year=${1##* }
+    [[ $name == *"$year"* ]] || return 1
+    if [[ $title == *partial* ]]; then [[ $name == *partial* ]]; else [[ $name != *partial* ]]; fi
 }
 
 sync_masters() {
-    local year rc=0
+    local year rc=0 file name title v
+    local -a imported=() titles=()
     year=$(date +%Y)
-    # Ein Fehler beim laufenden Jahr (z. B. kein Link) hält das Vorjahr nicht auf.
-    import_lumbra "otb-partial-$year" || rc=1
+    titles=("OTB partial $year")
     # Im Januar kann das Vorjahr noch einen Nachtrag bekommen haben.
-    if [[ $(date +%m) == 01 ]]; then import_lumbra "otb-$((year - 1))" || rc=1; fi
+    [[ $(date +%m) == 01 ]] && titles+=("OTB $((year - 1))")
+
+    shopt -s nullglob nocaseglob
+    for file in "$LUMBRA_INBOX"/*.7z ${LUMBRA_DROP:+"$LUMBRA_DROP"/*.7z}; do
+        name=${file##*/}
+        if [[ ${name,,} != *otb* || ${name,,} == *online* ]]; then
+            log "Lumbra: $name übersprungen (kein OTB-Paket)"
+            continue
+        fi
+        if import_lumbra_file "$file"; then
+            imported+=("$name")
+            [[ $file == "$LUMBRA_INBOX"/* ]] && rm -f "$file"
+        else
+            rc=1
+        fi
+    done
+    shopt -u nullglob nocaseglob
+
+    for title in "${titles[@]}"; do
+        # Kam das passende Paket gerade herein, gilt die angebotene Version als eingespielt.
+        for name in "${imported[@]}"; do
+            lumbra_matches "$title" "$name" || continue
+            v=$(lumbra_version "$title") || true
+            [[ -n $v ]] && ! grep -qsxF "$title@$v" "$STATE/lumbra-seen.txt" \
+                && echo "$title@$v" >> "$STATE/lumbra-seen.txt"
+        done
+        check_lumbra "$title" || rc=1
+    done
     return $rc
 }
 
