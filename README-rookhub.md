@@ -116,16 +116,19 @@ docker run --rm --name rookhub-explorer-sync --user 1000:1000 --network rookhub-
 
 `rookhub/explorer-sync` (im Image unter `/usr/local/bin`):
 
-1. **Meister**: spielt jedes OTB-Paket ein, das im Eingang liegt (`masters/inbox/*.7z`, nach dem
-   Import gelöscht, und `LUMBRA_DROP/*.7z`, nur lesend, bleibt liegen). Jede Datei (sha256) nur einmal,
-   Namen mit „Online“ oder ohne „OTB“ werden übersprungen. Danach liest es die Versionsdaten von
-   „OTB partial <Jahr>" (im Januar zusätzlich „OTB <Vorjahr>") auf der Download-Seite und meldet im
-   Log `NEUE VERSION <Datum>`, bis das passende Paket eingespielt ist (`state/lumbra-seen.txt`).
-   **Laden muss ein Mensch:** Seit 2026-10 gibt Lumbra Dateien nur noch über den Download-Bereich
-   <https://lumbrasgigabase.com/en/download-area-en/> heraus, mit einer Rechenaufgabe im Browser und
-   einer Lizenz-Zustimmung. Das wird bewusst nicht automatisiert. Paket im Browser laden und in den
-   SFTP-Drop-Ordner (`dumps/`) oder nach `/mnt/disks/sdf/rookhub-explorer/masters/inbox/` legen, der
-   nächste Lauf spielt es ein (sofort: `explorer-sync masters`).
+1. **Meister**: liest die Versionsdaten von „OTB partial <Jahr>" (im Januar zusätzlich „OTB
+   <Vorjahr>") auf <https://lumbrasgigabase.com/en/download-area-en/>. Ist eine Version noch nicht in
+   `state/lumbra-seen.txt`, lädt `rookhub/lumbra-fetch` das Paket nach `masters/inbox/`. Seit 2026-10
+   gibt Lumbra Dateien nur noch über diesen Download-Bereich heraus (Plugin lgb-download): Rechenaufgabe
+   (SHA-256, ALTCHA-Prinzip, ~2 s), Einmal-Token, Zustimmung zur Lizenz CC BY-NC 4.0, alles in einer
+   Cookie-Sitzung mit Origin/Referer der Seite. Der Nachtlauf stimmt der Lizenz im Namen des Users zu
+   (Entscheidung 2026-10-30). Danach spielt er jedes OTB-Paket ein, das im Eingang liegt
+   (`masters/inbox/*.7z`, nach dem Import gelöscht, und `LUMBRA_DROP/*.7z`, nur lesend, bleibt liegen):
+   jede Datei (sha256) nur einmal, Namen mit „Online“ oder ohne „OTB“ übersprungen. Erst ein
+   eingespieltes Paket markiert die Version als erledigt; sonst lädt der nächste Lauf erneut. Sperrt
+   Lumbra die Datei gerade (kurz nach jedem Download), versucht es der nächste Lauf. `-e LUMBRA_FETCH=0`
+   schaltet den Abruf ab, dann steht nur `NEUE VERSION` im Log und ein Mensch legt die Datei in den
+   Eingang. Von Hand: `lumbra-fetch "OTB partial 2026" /data/masters/inbox` im Image.
 2. **Lichess**: jeder Monat ≥ `LICHESS_FROM`, der nicht in `state/lichess-imported.txt` steht, neueste
    zuerst: Download (fortsetzbar), sha256 gegen `sha256sums.txt`, gefilterter Import, Dump löschen.
 
@@ -144,8 +147,7 @@ Zeile, davor die letzten Ablehnungen, alles in `sync.log`). Solche Monate bzw. L
 landen in `state/lichess-rejected.txt` bzw. `state/lumbra-rejected.txt` statt in `*-imported.txt`
 und werden nicht automatisch wiederholt (Zeile löschen = erneut importieren). Ein gescheiterter
 Lumbra-Import oder eine Download-Seite ohne Versionsangabe gilt als Fehler: Der Lauf endet mit „Sync
-fertig — mit Fehlern" und Exit 1. Eine neue, noch nicht geladene Version ist kein Fehler, nur eine
-Meldung.
+fertig — mit Fehlern" und Exit 1, ebenso ein gescheiterter Download (außer „Datei gesperrt“).
 
 ## Neuaufbau
 
@@ -176,8 +178,9 @@ Fehlermeldung nur Partien des laufenden Jahres. Reihenfolge (Zeiten gemessen bei
 
 2. **Meister-Grundstock „OTB Complete“:** Quelle ist der Download-Bereich
    <https://lumbrasgigabase.com/en/download-area-en/>, Paket „OTB Complete“
-   (`LumbrasGigaBase_OTB_Complete.7z`, ~2,4 GB, entpackt ~9 GB PGN). Im Browser laden (Rechenaufgabe +
-   Lizenz-Zustimmung, siehe oben) und nach `masters/` legen. Immer die aktuelle Fassung laden: Lumbra
+   (`LumbrasGigaBase_OTB_Complete.7z`, ~2,4 GB, entpackt ~9 GB PGN). Laden mit
+   `docker run --rm --user 1000:1000 -v /mnt/disks/sdf/rookhub-explorer:/data rookhub-explorer:latest
+   lumbra-fetch "OTB Complete" /data/masters` (oder im Browser). Immer die aktuelle Fassung laden: Lumbra
    aktualisiert monatlich, und die Kopie in `masters/` (Stand 2026-07) liegt auf derselben Platte wie
    die DB. Nicht in den Eingang legen, der nimmt nur Jahres- und Teilpakete in den Nachtlauf. Der
    Import streamt das Archiv, ohne es zu entpacken: 71 min, danach ~6,5 GB in `db/` (2026-09-22:
@@ -215,7 +218,7 @@ braucht ~25 GB mehr.
 - `src/main.rs`/`src/lila.rs`: Spieler-Blacklist nur mit Lichess-Token abfragen (ohne Token schlug
   der Abruf alle 5 s mit 401 fehl).
 - `Cargo.toml`: rocksdb ohne `io-uring` (Docker blockiert io_uring per seccomp).
-- `Dockerfile.rookhub` (Basis-Images per Digest, megatools aus Debian), `rookhub/explorer-sync`, `rookhub/explorer-gateway.conf`, diese Datei.
+- `Dockerfile.rookhub` (Basis-Images per Digest, megatools + python3 aus Debian), `rookhub/explorer-sync`, `rookhub/lumbra-fetch`, `rookhub/explorer-gateway.conf`, diese Datei.
 
 ## Spielerindex (Nebenleser, seit 2026-10-09)
 

@@ -19,10 +19,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # debian:trixie-slim
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-# megatools für die Lumbra-Downloads von MEGA aus dem Debian-Paket (trixie: 1.11.5, signiertes
-# Archiv) statt `curl | tar` eines Fremd-Tarballs ohne Prüfsumme; /usr/bin/megatools (`megatools dl`).
+# megatools aus dem Debian-Paket (trixie: 1.11.5, signiertes Archiv) für MEGA-Links von Hand
+# (`megatools dl`); python3 für rookhub/lumbra-fetch (Lumbra-Download-Bereich seit 2026-10).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl libssl3 zstd 7zip megatools \
+        ca-certificates curl libssl3 zstd 7zip megatools python3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/ /usr/local/bin/
 COPY rookhub/ /usr/local/bin/

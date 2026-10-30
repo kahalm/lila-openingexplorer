@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Lädt ein Paket aus Lumbra's GigaBase-Download-Bereich, so wie es ein Browser tut.
+
+Seit 2026-10 gibt Lumbra Dateien nur über https://lumbrasgigabase.com/en/download-area-en/ heraus
+(WordPress-Plugin lgb-download). Ein Klick auf „Download“ macht dort drei Schritte, die dieses Skript
+nachvollzieht:
+
+  1. challenge — der Server stellt eine Rechenaufgabe (ALTCHA-Prinzip): gesucht ist n mit
+     SHA-256(salt + n) == challenge, n <= maxnumber. Gelöst in wenigen Sekunden.
+  2. begin     — mit der Lösung gibt es ein Einmal-Token; bei Paketen unter Lizenz zusätzlich
+     accept    — die Zustimmung zur Lizenz (heute CC BY-NC 4.0). Der Nutzer hat am 2026-10-30
+                 entschieden, dass der Nachtlauf in seinem Namen zustimmt.
+  3. Download  — GET /lgb-file/<id>/?lgbt=<token>.
+
+Alle Schritte laufen in einer Sitzung: begin setzt das Cookie lgb_download_session, accept und der
+Download brauchen es. Origin/Referer müssen auf die Seite zeigen, sonst antwortet sie „bad_origin“.
+
+Der Nachtlauf ruft das nur auf, wenn die Download-Seite eine neue Version zeigt (explorer-sync),
+also etwa einmal im Monat. Lumbra sperrt eine Datei nach dem Download eine Weile („file_locked“);
+dann endet das Skript mit Exit 75 und der nächste Lauf versucht es erneut.
+
+Aufruf: lumbra-fetch "OTB partial 2026" /data/masters/inbox
+Ausgabe (stdout): Pfad der geladenen Datei. Exit 0 = geladen, 75 = gesperrt, sonst Fehler.
+"""
+import base64
+import hashlib
+import html
+import http.cookiejar
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+SITE = 'https://lumbrasgigabase.com'
+AREA = os.environ.get('LUMBRA_AREA', SITE + '/en/download-area-en/')
+AJAX = SITE + '/wp-admin/admin-ajax.php'
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (rookhub-explorer-sync; monatlicher Abruf)',
+    'Origin': SITE,
+    'Referer': AREA,
+}
+SEVEN_ZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
+
+
+class Locked(Exception):
+    pass
+
+
+def log(msg):
+    print(f'lumbra-fetch: {msg}', file=sys.stderr)
+
+
+def get(url, timeout=60):
+    return urllib.request.urlopen(urllib.request.Request(url, headers=HEADERS), timeout=timeout)
+
+
+def find_download(title):
+    """Download-Id und Version des Pakets mit genau diesem Titel aus der Download-Seite."""
+    page = get(AREA).read().decode('utf-8', 'replace')
+    for card in page.split('<article class="lgb-download__card"')[1:]:
+        text = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', card)))
+        h3 = re.search(r'<h3[^>]*>(.*?)</h3>', card, re.S)
+        name = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', '', h3.group(1)))).strip() if h3 else ''
+        action = re.search(r'data-lgb-download-action="(\d+)"', card)
+        version = re.search(r'Version: (\d{4}-\d{2}-\d{2})', text)
+        if name == title and action:
+            return action.group(1), version.group(1) if version else ''
+    raise SystemExit(f'lumbra-fetch: Paket „{title}“ nicht auf {AREA} gefunden')
+
+
+def action(**fields):
+    fields['action'] = 'lgb_download_consent'
+    req = urllib.request.Request(AJAX, data=urllib.parse.urlencode(fields).encode(), headers={
+        **HEADERS, 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'})
+    try:
+        resp = urllib.request.urlopen(req, timeout=60)
+        status, payload = resp.status, json.load(resp)
+    except urllib.error.HTTPError as e:
+        status, payload = e.code, json.load(e)
+    data = (payload or {}).get('data') or {}
+    if data.get('code') == 'file_locked':
+        raise Locked(f'Datei gesperrt, wieder frei in {data.get("retry_after")} s')
+    ok = status == 200 and (payload or {}).get('success') is True
+    return ok, data
+
+
+def solve(challenge):
+    """n mit SHA-256(salt + n) == challenge."""
+    salt, target, top = challenge['salt'], challenge['challenge'], int(challenge['maxnumber'])
+    prefix = hashlib.sha256(salt.encode())
+    for n in range(top + 1):
+        h = prefix.copy()
+        h.update(str(n).encode())
+        if h.hexdigest() == target:
+            return n
+    raise SystemExit('lumbra-fetch: Rechenaufgabe ohne Lösung')
+
+
+def begin(download_id, retry=True):
+    ok, ch = action(operation='challenge', download_id=download_id)
+    if not ok:
+        raise SystemExit(f'lumbra-fetch: challenge abgelehnt: {ch}')
+    proof = ''
+    if ch.get('required'):
+        n = solve(ch)
+        proof = base64.b64encode(json.dumps({
+            'algorithm': ch['algorithm'], 'challenge': ch['challenge'], 'number': n,
+            'salt': ch['salt'], 'signature': ch['signature']}, separators=(',', ':')).encode()).decode()
+    ok, data = action(operation='begin', download_id=download_id, pow=proof)
+    if not ok and data.get('code') in ('lgb_pow_invalid', 'lgb_pow_required') and retry:
+        return begin(download_id, retry=False)
+    if not ok or not data.get('action_token'):
+        raise SystemExit(f'lumbra-fetch: begin abgelehnt: {data}')
+    return data
+
+
+def consent(download_id, data):
+    if not data.get('required') or data.get('consented'):
+        return
+    log(f'stimme Lizenz {data.get("license")} (Version {data.get("license_version")}) zu')
+    ok, res = action(operation='accept', download_id=download_id, action_token=data['action_token'],
+                     nonce=data.get('nonce', ''), license=data.get('license', ''),
+                     license_version=data.get('license_version', ''), consent='1')
+    if not ok:
+        raise SystemExit(f'lumbra-fetch: Lizenz-Zustimmung abgelehnt: {res}')
+
+
+def download(download_id, token, out_dir):
+    url = f'{SITE}/lgb-file/{download_id}/?' + urllib.parse.urlencode({'lgbt': token})
+    resp = get(url, timeout=120)
+    name = ''
+    cd = resp.headers.get('Content-Disposition', '')
+    m = re.search(r"filename\*=UTF-8''([^;]+)", cd) or re.search(r'filename="?([^";]+)"?', cd)
+    if m:
+        name = urllib.parse.unquote(m.group(1))
+    if not name:
+        name = urllib.parse.unquote(os.path.basename(urllib.parse.urlparse(resp.geturl()).path))
+    name = os.path.basename(name)
+    if not name.lower().endswith('.7z'):
+        raise SystemExit(f'lumbra-fetch: unerwartete Datei „{name}“ ({resp.headers.get("Content-Type")})')
+    final = os.path.join(out_dir, name)
+    part = final + '.part'
+    with open(part, 'wb') as f:
+        head = resp.read(len(SEVEN_ZIP_MAGIC))
+        if head != SEVEN_ZIP_MAGIC:
+            os.unlink(part)
+            raise SystemExit(f'lumbra-fetch: „{name}“ ist kein 7z-Archiv')
+        f.write(head)
+        while chunk := resp.read(1 << 20):
+            f.write(chunk)
+    os.replace(part, final)
+    return final
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise SystemExit('usage: lumbra-fetch "<Pakettitel>" <Zielordner>')
+    title, out_dir = sys.argv[1], sys.argv[2]
+    os.makedirs(out_dir, exist_ok=True)
+    # begin setzt das Cookie lgb_download_session; ohne es lehnt accept mit „invalid“ ab.
+    urllib.request.install_opener(urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())))
+    download_id, version = find_download(title)
+    log(f'„{title}“ Version {version or "?"} (Id {download_id})')
+    try:
+        data = begin(download_id)
+        consent(download_id, data)
+        path = download(download_id, data['action_token'], out_dir)
+    except Locked as e:
+        log(str(e))
+        sys.exit(75)
+    log(f'geladen: {os.path.basename(path)} ({os.path.getsize(path) / 1e6:.1f} MB)')
+    print(path)
+
+
+if __name__ == '__main__':
+    main()

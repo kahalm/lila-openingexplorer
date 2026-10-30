@@ -6,7 +6,7 @@
 #     nicht importiert wurde (neueste zuerst): laden, sha256 prüfen, gefiltert importieren
 #     (Elo-Schnitt >= LICHESS_MIN_AVG, ohne Bullet/UltraBullet), Dump löschen.
 #  2. Meister: Lumbra's GigaBase — spielt OTB-Pakete aus dem Eingang ein und meldet eine neue Version
-#     (Download nur noch im Browser, siehe README). Dubletten erkennt der Server (inhaltsbasierte IDs).
+#     (bei neuer Version per lumbra-fetch geladen). Dubletten erkennt der Server (inhaltsbasierte IDs).
 #
 # Der Import ist idempotent (Lichess: Partie-ID, Meister: Inhalts-Hash), ein abgebrochener Lauf
 # darf also einfach wiederholt werden. flock verhindert parallele Läufe.
@@ -88,14 +88,17 @@ sync_lichess() {
 }
 
 # ---------------------------------------------------------------- Meister (Lumbra)
-# Seit 2026-10 gibt Lumbra Downloads nur noch über einen Download-Bereich mit Rechenaufgabe im Browser
-# heraus (Plugin lgb-download, Proof-of-Work + Lizenz-Zustimmung) — das automatisiert dieses Skript
-# bewusst NICHT. Es liest nur die öffentliche Seite, meldet eine neue Version und spielt ein, was
-# ein Mensch im Browser geladen und in den Eingang gelegt hat:
+# Seit 2026-10 gibt Lumbra Downloads nur noch über einen Download-Bereich mit Rechenaufgabe und
+# Lizenz-Zustimmung heraus (Plugin lgb-download). Zeigt die Seite für ein Paket eine Version, die noch
+# nicht eingespielt ist, lädt `lumbra-fetch` es in den Eingang — Rechenaufgabe lösen und der Lizenz
+# (CC BY-NC 4.0) zustimmen wie ein Browser; vom User am 2026-10-30 ausdrücklich so entschieden.
+# Eingespielt wird alles, was im Eingang liegt:
 #   $DATA/masters/inbox/   (Host: /mnt/disks/sdf/rookhub-explorer/masters/inbox) — Datei wird nach
 #                          erfolgreichem Import gelöscht
 #   $LUMBRA_DROP           (optional, nur lesend eingehängt, z. B. der SFTP-Drop-Ordner) — bleibt liegen
 # Genommen werden nur OTB-Pakete (*OTB*.7z ohne „Online"); dieselbe Datei (sha256) nie zweimal.
+# LUMBRA_FETCH=0 schaltet den Abruf ab (dann nur Meldung + Eingang).
+LUMBRA_FETCH=${LUMBRA_FETCH:-1}
 LUMBRA_AREA=${LUMBRA_AREA:-https://lumbrasgigabase.com/en/download-area-en/}
 LUMBRA_INBOX=$DATA/masters/inbox
 LUMBRA_DROP=${LUMBRA_DROP-}
@@ -110,10 +113,13 @@ lumbra_version() {
         | grep -o -E "$title Version: [0-9]{4}-[0-9]{2}-[0-9]{2}" | head -1 | sed 's/.*Version: //'
 }
 
-# Meldet, ob Lumbra eine Version anbietet, die noch nicht eingespielt ist. Kein Fehler — der Download
-# braucht einen Menschen; die Meldung steht jede Nacht im Log, bis die Datei im Eingang lag.
-check_lumbra() {
-    local title=$1 version
+# Bietet Lumbra eine Version an, die noch nicht eingespielt ist, wird sie in den Eingang geladen.
+# Eine neue Version hängt es als „<Titel>@<Version>“ an das Array `pending` des Aufrufers (sync_masters)
+# an; log schreibt auf stdout, deshalb kein $(…). Exit 1 = Seite ohne Version oder
+# Abruf gescheitert; eine gesperrte Datei (Lumbra sperrt kurz nach jedem Download) ist kein Fehler,
+# der nächste Lauf versucht es erneut.
+fetch_lumbra() {
+    local title=$1 version frc=0
     version=$(lumbra_version "$title") || true
     if [[ -z $version ]]; then
         log "Lumbra „$title“: keine Version auf $LUMBRA_AREA gefunden (Seite umgebaut?)"
@@ -122,8 +128,19 @@ check_lumbra() {
     if grep -qsxF "$title@$version" "$STATE/lumbra-seen.txt"; then
         return 0
     fi
-    log "Lumbra „$title“: NEUE VERSION $version — bitte im Browser laden ($LUMBRA_AREA)" \
-        "und nach masters/inbox/ legen${LUMBRA_DROP:+ oder in den Drop-Ordner}"
+    pending+=("$title@$version")
+    if [[ $LUMBRA_FETCH != 1 ]]; then
+        log "Lumbra „$title“: NEUE VERSION $version — Abruf aus (LUMBRA_FETCH=0), bitte im Browser laden" \
+            "($LUMBRA_AREA) und nach masters/inbox/ legen${LUMBRA_DROP:+ oder in den Drop-Ordner}"
+        return 0
+    fi
+    log "Lumbra „$title“: neue Version $version, Download"
+    lumbra-fetch "$title" "$LUMBRA_INBOX" > /dev/null || frc=$?
+    case $frc in
+        0) ;;
+        75) log "Lumbra „$title“: Datei bei Lumbra gerade gesperrt — nächster Lauf" ;;
+        *) log "Lumbra „$title“: Download fehlgeschlagen (Exit $frc)"; return 1 ;;
+    esac
 }
 
 # Eine Datei einspielen. Exit 0 = eingespielt oder schon bekannt, 1 = Fehler.
@@ -155,12 +172,17 @@ lumbra_matches() {
 }
 
 sync_masters() {
-    local year rc=0 file name title v
-    local -a imported=() titles=()
+    local year rc=0 file name title entry
+    local -a imported=() titles=() pending=()
     year=$(date +%Y)
     titles=("OTB partial $year")
     # Im Januar kann das Vorjahr noch einen Nachtrag bekommen haben.
     [[ $(date +%m) == 01 ]] && titles+=("OTB $((year - 1))")
+
+    # Erst neue Versionen in den Eingang holen, dann alles im Eingang einspielen.
+    for title in "${titles[@]}"; do
+        fetch_lumbra "$title" || rc=1
+    done
 
     shopt -s nullglob nocaseglob
     for file in "$LUMBRA_INBOX"/*.7z ${LUMBRA_DROP:+"$LUMBRA_DROP"/*.7z}; do
@@ -178,15 +200,16 @@ sync_masters() {
     done
     shopt -u nullglob nocaseglob
 
-    for title in "${titles[@]}"; do
-        # Kam das passende Paket gerade herein, gilt die angebotene Version als eingespielt.
+    # Eine neue Version gilt als eingespielt, sobald ein passendes Paket durch den Import kam;
+    # sonst holt der nächste Lauf sie erneut.
+    for entry in "${pending[@]}"; do
+        title=${entry%@*}
         for name in "${imported[@]}"; do
-            lumbra_matches "$title" "$name" || continue
-            v=$(lumbra_version "$title") || true
-            [[ -n $v ]] && ! grep -qsxF "$title@$v" "$STATE/lumbra-seen.txt" \
-                && echo "$title@$v" >> "$STATE/lumbra-seen.txt"
+            if lumbra_matches "$title" "$name"; then
+                echo "$entry" >> "$STATE/lumbra-seen.txt"
+                break
+            fi
         done
-        check_lumbra "$title" || rc=1
     done
     return $rc
 }
