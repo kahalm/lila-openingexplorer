@@ -185,7 +185,11 @@ def index_file(path, month, want_sha):
     buf = {c: [] for c in cols}
     raw = open(path, 'rb', buffering=0)
     hr = HashingReader(raw)
-    stream = zstandard.ZstdDecompressor().stream_reader(io.BufferedReader(hr, 1 << 20), read_size=1 << 20)
+    # read_across_frames: ein Dump aus mehreren zstd-Frames (pzstd, angehängter Skippable-Frame)
+    # wird ganz gelesen. Ohne das Flag liefert jeder read() höchstens bis zum Frame-Ende, und je
+    # nach python-zstandard-Stand endet der Leser dort ganz (G4-004).
+    stream = zstandard.ZstdDecompressor().stream_reader(io.BufferedReader(hr, 1 << 20), read_size=1 << 20,
+                                                        read_across_frames=True)
     lines = io.BufferedReader(stream, 1 << 22)
     h = {}
     n_games = n_kept = 0
@@ -237,7 +241,9 @@ def index_file(path, month, want_sha):
     if buf['id']:
         flush()
     writer.close()
-    while raw.read(1 << 20):              # Rest für die Prüfsumme (Puffer hinter dem letzten Spiel)
+    # Rest für die Prüfsumme (Puffer hinter dem letzten Spiel): über hr lesen, nur dann zählt er in
+    # hr.sha — raw.read ging am Hash vorbei (G4-004).
+    while hr.read(1 << 20):
         pass
     have = hr.sha.hexdigest()
     if want_sha and have != want_sha:

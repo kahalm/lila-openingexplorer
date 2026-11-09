@@ -256,7 +256,9 @@ diff -q rookhub/player-index/player-index.py ~/claude/player-index/player-index.
   && diff -q rookhub/player-index/player-index-run ~/claude/player-index/player-index-run
 ```
 
-Tests (ohne Netz/pyarrow): `python3 -I tests/rookhub/test_player_index.py`. Abfrage z. B.:
+Tests (ohne Netz/pyarrow): `python3 -I tests/rookhub/test_player_index.py`; die Lesetests von `index_file`
+(Mehr-Frame-Dumps, Prüfsumme) brauchen zstandard/pyarrow und laufen mit dem Cron-venv:
+`~/claude/player-index/.venv/bin/python -I tests/rookhub/test_player_index.py`. Abfrage z. B.:
 
 ```sh
 ~/claude/player-index/.venv/bin/python -c "import duckdb; print(duckdb.sql(\"select count(*) from '/mnt/disks/sdf/rookhub-explorer/player-index/parquet/*.parquet' where white='kahalm' or black='kahalm'\"))"
