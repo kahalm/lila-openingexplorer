@@ -13,7 +13,9 @@ Ablauf eines Laufs (Cron alle 10 min, siehe README-rookhub.md):
             nachgeladen (Lücke vor Einführung dieses Index). Monate, die der Explorer noch
             nicht angefasst hat, werden NICHT geladen — die kommen über Schritt 1.
   3. index: jeder Dump in inbox/ wird gelesen (sha256 läuft mit), nach parquet/<Monat>.parquet
-            geschrieben, in state/indexed.txt vermerkt und aus inbox/ gelöscht.
+            geschrieben, in state/indexed.txt vermerkt und aus inbox/ gelöscht. Scheitert ein Monat,
+            steht er mit Zeitstempel in state/failed.txt, der Lauf endet, und der Monat bleibt
+            PLAYER_INDEX_RETRY_HOURS (24) lang liegen.
 Schritt 1 läuft immer; 2+3 nur unter einem Lock (ein Lauf zur Zeit).
 """
 import argparse, datetime, fcntl, hashlib, io, os, re, subprocess, sys, time, urllib.request
@@ -22,6 +24,9 @@ EXPLORER = os.environ.get('EXPLORER_DATA', '/mnt/disks/sdf/rookhub-explorer')
 ROOT = os.environ.get('PLAYER_INDEX_DATA', f'{EXPLORER}/player-index')
 FROM = os.environ.get('PLAYER_INDEX_FROM', '2024-01')
 MAX_INBOX = int(os.environ.get('PLAYER_INDEX_MAX_INBOX', '2'))   # höchstens so viele Dumps vorhalten
+# Ein gescheiterter Monat (state/failed.txt) wird so lange weder verlinkt noch geladen noch indexiert —
+# sonst lud ein dauerhafter Fehler (pyarrow fehlt, Platte voll) denselben Dump (~30 GB) endlos neu (S2-003).
+RETRY_HOURS = float(os.environ.get('PLAYER_INDEX_RETRY_HOURS', '24'))
 PLIES = 24
 HASH_AT = (8, 12, 16, 20, 24)
 BASE = 'https://database.lichess.org/standard'
@@ -48,11 +53,40 @@ def read_set(path):
         return set()
 
 
+def recently_failed(now=None):
+    """Monate aus state/failed.txt („<Monat> <ISO-Zeit> <Fehler>“), deren Fehler jünger als
+    RETRY_HOURS ist."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    out = set()
+    try:
+        lines = open(f'{STATE}/failed.txt').read().splitlines()
+    except FileNotFoundError:
+        return out
+    for l in lines:
+        p = l.split(' ', 2)
+        if len(p) < 2:
+            continue
+        try:
+            when = datetime.datetime.fromisoformat(p[1])
+        except ValueError:
+            continue
+        if (now - when).total_seconds() < RETRY_HOURS * 3600:
+            out.add(p[0])
+    return out
+
+
+def mark_failed(month, err):
+    with open(f'{STATE}/failed.txt', 'a') as s:
+        when = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+        s.write(f'{month} {when} {str(err).splitlines()[0][:200] if str(err) else type(err).__name__}\n')
+
+
 # ------------------------------------------------------------------ 1. link
 def link_dumps():
+    skip = read_set(f'{STATE}/indexed.txt') | recently_failed()
     for f in os.listdir(f'{EXPLORER}/dumps'):
         m = NAME.match(f)
-        if not m or m.group(1) < FROM or m.group(1) in read_set(f'{STATE}/indexed.txt'):
+        if not m or m.group(1) < FROM or m.group(1) in skip:
             continue
         dst = f'{INBOX}/{f}'
         if not os.path.exists(dst):
@@ -69,7 +103,7 @@ def fetch_missing(sums):
     have = {NAME.match(f).group(1) for f in os.listdir(INBOX) if NAME.match(f)}
     if len(have) >= MAX_INBOX:
         return False
-    done = read_set(f'{STATE}/indexed.txt')
+    done = read_set(f'{STATE}/indexed.txt') | recently_failed()
     imported = read_set(f'{EXPLORER}/state/lichess-imported.txt')
     in_explorer = {NAME.match(f).group(1) for f in os.listdir(f'{EXPLORER}/dumps') if NAME.match(f)}
     todo = sorted((m for m in imported if m >= FROM and m not in done and m not in have and m not in in_explorer
@@ -235,7 +269,7 @@ def main():
     while True:
         link_dumps()
         files = sorted((f for f in os.listdir(INBOX) if NAME.match(f)), reverse=True)
-        done = read_set(f'{STATE}/indexed.txt')
+        done = read_set(f'{STATE}/indexed.txt') | recently_failed()
         files = [f for f in files if NAME.match(f).group(1) not in done]
         if not files:
             if fetch_missing(sums):
@@ -247,9 +281,13 @@ def main():
         try:
             n, k, sec = index_file(f'{INBOX}/{f}', month, sums.get(f))
         except Exception as e:
-            log(f'{month}: FEHLER {e} — Dump verworfen, wird neu geladen')
+            # Merken und den Lauf beenden: ein Fehler, der beim Wiederholen wieder auftritt, lud
+            # sonst denselben Monat in einer Schleife neu (S2-003). Nach RETRY_HOURS neuer Versuch.
+            log(f'{month}: FEHLER {e} — Dump verworfen, vermerkt in state/failed.txt, '
+                f'neuer Versuch frühestens in {RETRY_HOURS:g} h')
+            mark_failed(month, e)
             os.remove(f'{INBOX}/{f}')
-            continue
+            return
         with open(f'{STATE}/indexed.txt', 'a') as s:
             s.write(month + '\n')
         os.remove(f'{INBOX}/{f}')

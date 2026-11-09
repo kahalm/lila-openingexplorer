@@ -237,7 +237,7 @@ Zugfolge nach 8/12/16/20/24 Halbzügen (blake2b, 8 Byte). Ohne Bullet/UltraBulle
 | Was | Wo |
 |---|---|
 | Daten | `/mnt/disks/sdf/rookhub-explorer/player-index/parquet/<Monat>.parquet` (~5 GB/Monat) |
-| Stand | `player-index/state/indexed.txt`, Log `player-index/index.log` |
+| Stand | `player-index/state/indexed.txt`, gescheiterte Monate `state/failed.txt` (Monat, Zeit, Fehler; 24 h Pause, `PLAYER_INDEX_RETRY_HOURS`), Log `player-index/index.log` |
 | Installiert | `~/claude/player-index/` (Kopie von Skript + Hülle, venv mit pyarrow/zstandard/duckdb) |
 | Cron | `*/10 * * * * $HOME/claude/player-index/player-index-run` |
 
