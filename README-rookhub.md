@@ -244,8 +244,19 @@ Zugfolge nach 8/12/16/20/24 Halbzügen (blake2b, 8 Byte). Ohne Bullet/UltraBulle
 Ablauf: fertige Dumps in `dumps/` werden nach `player-index/inbox/` hart verlinkt (kein zweiter
 Download, der Explorer darf sie weiter löschen); Monate, die der Explorer schon vor dem Index gelöscht
 hat, lädt der Index selbst nach (höchstens 2 Dumps gleichzeitig vorrätig). sha256 läuft beim Lesen mit.
-Ab `PLAYER_INDEX_FROM` (Standard 2024-01). Nach Änderung am Skript: beide Dateien nach
-`~/claude/player-index/` kopieren. Abfrage z. B.:
+Ab `PLAYER_INDEX_FROM` (Standard 2024-01).
+
+**Der Cron läuft NICHT aus dem Repo**, sondern aus der Kopie in `~/claude/player-index/` (dort liegt
+auch das venv). Ein gemergter Fix wirkt erst nach dem Kopieren — nach jeder Änderung an
+`rookhub/player-index/`:
+
+```sh
+cp rookhub/player-index/player-index.py rookhub/player-index/player-index-run ~/claude/player-index/
+diff -q rookhub/player-index/player-index.py ~/claude/player-index/player-index.py \
+  && diff -q rookhub/player-index/player-index-run ~/claude/player-index/player-index-run
+```
+
+Tests (ohne Netz/pyarrow): `python3 -I tests/rookhub/test_player_index.py`. Abfrage z. B.:
 
 ```sh
 ~/claude/player-index/.venv/bin/python -c "import duckdb; print(duckdb.sql(\"select count(*) from '/mnt/disks/sdf/rookhub-explorer/player-index/parquet/*.parquet' where white='kahalm' or black='kahalm'\"))"

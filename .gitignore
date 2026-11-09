@@ -2,3 +2,5 @@
 /_db
 *.pgn
 *.zst
+__pycache__/
+*.pyc
