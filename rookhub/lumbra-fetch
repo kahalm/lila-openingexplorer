@@ -20,7 +20,9 @@ also etwa einmal im Monat. Lumbra sperrt eine Datei nach dem Download eine Weile
 dann endet das Skript mit Exit 75 und der nächste Lauf versucht es erneut.
 
 Aufruf: lumbra-fetch "OTB partial 2026" /data/masters/inbox
-Ausgabe (stdout): Pfad der geladenen Datei. Exit 0 = geladen, 75 = gesperrt, sonst Fehler.
+Ausgabe (stdout): Pfad der geladenen Datei. Exit 0 = geladen, 75 = gesperrt („file_locked“), 1 = jeder
+andere Fehler mit einer Zeile auf stderr (HTTP-Fehler, Antwort ohne JSON — etwa eine Sperr-/Cloudflare-
+Seite —, Rechenaufgabe über LUMBRA_MAX_NUMBER, Datei über LUMBRA_MAX_BYTES), nie ein Traceback.
 """
 import base64
 import hashlib
@@ -43,6 +45,10 @@ HEADERS = {
     'Referer': AREA,
 }
 SEVEN_ZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
+# Deckel gegen eine fehlerhafte/feindliche Gegenstelle (S2-007): die Rechenaufgabe des Plugins liegt
+# bei ~10^5–10^6 Versuchen, die Pakete bei wenigen GB („OTB Complete“ ~2,4 GB).
+MAX_NUMBER = int(os.environ.get('LUMBRA_MAX_NUMBER', str(10 ** 7)))
+MAX_BYTES = int(os.environ.get('LUMBRA_MAX_BYTES', str(16 * 1024 ** 3)))
 
 
 class Locked(Exception):
@@ -77,19 +83,30 @@ def action(**fields):
         **HEADERS, 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'})
     try:
         resp = urllib.request.urlopen(req, timeout=60)
-        status, payload = resp.status, json.load(resp)
+        status, body = resp.status, resp.read()
     except urllib.error.HTTPError as e:
-        status, payload = e.code, json.load(e)
-    data = (payload or {}).get('data') or {}
+        status, body = e.code, e.read()
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        snippet = re.sub(r'\s+', ' ', body[:120].decode('utf-8', 'replace')).strip()
+        raise SystemExit(f'lumbra-fetch: {fields.get("operation")}: HTTP {status}, Antwort ohne JSON: {snippet!r}')
+    if not isinstance(payload, dict):
+        raise SystemExit(f'lumbra-fetch: {fields.get("operation")}: HTTP {status}, unerwartete Antwort')
+    data = payload.get('data') or {}
+    if not isinstance(data, dict):
+        data = {}
     if data.get('code') == 'file_locked':
         raise Locked(f'Datei gesperrt, wieder frei in {data.get("retry_after")} s')
-    ok = status == 200 and (payload or {}).get('success') is True
+    ok = status == 200 and payload.get('success') is True
     return ok, data
 
 
 def solve(challenge):
     """n mit SHA-256(salt + n) == challenge."""
     salt, target, top = challenge['salt'], challenge['challenge'], int(challenge['maxnumber'])
+    if not 0 <= top <= MAX_NUMBER:
+        raise SystemExit(f'lumbra-fetch: Rechenaufgabe mit maxnumber {top} über dem Deckel {MAX_NUMBER}')
     prefix = hashlib.sha256(salt.encode())
     for n in range(top + 1):
         h = prefix.copy()
@@ -130,7 +147,13 @@ def consent(download_id, data):
 
 def download(download_id, token, out_dir):
     url = f'{SITE}/lgb-file/{download_id}/?' + urllib.parse.urlencode({'lgbt': token})
-    resp = get(url, timeout=120)
+    try:
+        resp = get(url, timeout=120)
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f'lumbra-fetch: Download HTTP {e.code} ({e.reason})')
+    length = resp.headers.get('Content-Length')
+    if length and length.isdigit() and int(length) > MAX_BYTES:
+        raise SystemExit(f'lumbra-fetch: Datei {int(length) / 1e9:.1f} GB über dem Deckel {MAX_BYTES / 1e9:.1f} GB')
     name = ''
     cd = resp.headers.get('Content-Disposition', '')
     m = re.search(r"filename\*=UTF-8''([^;]+)", cd) or re.search(r'filename="?([^";]+)"?', cd)
@@ -143,14 +166,23 @@ def download(download_id, token, out_dir):
         raise SystemExit(f'lumbra-fetch: unerwartete Datei „{name}“ ({resp.headers.get("Content-Type")})')
     final = os.path.join(out_dir, name)
     part = final + '.part'
-    with open(part, 'wb') as f:
-        head = resp.read(len(SEVEN_ZIP_MAGIC))
-        if head != SEVEN_ZIP_MAGIC:
+    written = 0
+    try:
+        with open(part, 'wb') as f:
+            head = resp.read(len(SEVEN_ZIP_MAGIC))
+            if head != SEVEN_ZIP_MAGIC:
+                raise SystemExit(f'lumbra-fetch: „{name}“ ist kein 7z-Archiv')
+            f.write(head)
+            written = len(head)
+            while chunk := resp.read(1 << 20):
+                written += len(chunk)
+                if written > MAX_BYTES:
+                    raise SystemExit(f'lumbra-fetch: „{name}“ über dem Deckel {MAX_BYTES / 1e9:.1f} GB, abgebrochen')
+                f.write(chunk)
+    except BaseException:
+        if os.path.exists(part):
             os.unlink(part)
-            raise SystemExit(f'lumbra-fetch: „{name}“ ist kein 7z-Archiv')
-        f.write(head)
-        while chunk := resp.read(1 << 20):
-            f.write(chunk)
+        raise
     os.replace(part, final)
     return final
 
@@ -163,15 +195,19 @@ def main():
     # begin setzt das Cookie lgb_download_session; ohne es lehnt accept mit „invalid“ ab.
     urllib.request.install_opener(urllib.request.build_opener(
         urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())))
-    download_id, version = find_download(title)
-    log(f'„{title}“ Version {version or "?"} (Id {download_id})')
     try:
+        download_id, version = find_download(title)
+        log(f'„{title}“ Version {version or "?"} (Id {download_id})')
         data = begin(download_id)
         consent(download_id, data)
         path = download(download_id, data['action_token'], out_dir)
     except Locked as e:
         log(str(e))
         sys.exit(75)
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f'lumbra-fetch: HTTP {e.code} ({e.reason})')
+    except (urllib.error.URLError, OSError) as e:
+        raise SystemExit(f'lumbra-fetch: Abruf gescheitert: {e}')
     log(f'geladen: {os.path.basename(path)} ({os.path.getsize(path) / 1e6:.1f} MB)')
     print(path)
 

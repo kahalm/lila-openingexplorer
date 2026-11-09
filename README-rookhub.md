@@ -133,6 +133,9 @@ docker run --rm --name rookhub-explorer-sync --user 1000:1000 --network rookhub-
    Eingang. Von Hand: `lumbra-fetch "OTB partial 2026" /data/masters/inbox` im Image.
    Trockenlauf mit Stubs (kein Netz): `docker run --rm --network none -v "$PWD":/src:ro
    rookhub-explorer:latest bash /src/tests/rookhub/test-explorer-sync.sh`.
+   `lumbra-fetch` endet nur bei einer gesperrten Datei mit Exit 75; Fehlerseiten ohne JSON, HTTP-Fehler,
+   eine Rechenaufgabe über `LUMBRA_MAX_NUMBER` (10^7) oder eine Datei über `LUMBRA_MAX_BYTES` (16 GiB)
+   enden mit Exit 1 und einer Zeile Meldung. Tests: `python3 -I tests/rookhub/test_lumbra_fetch.py`.
 2. **Lichess**: jeder Monat ≥ `LICHESS_FROM`, der nicht in `state/lichess-imported.txt` steht, neueste
    zuerst: Download (fortsetzbar), sha256 gegen `sha256sums.txt`, gefilterter Import, Dump löschen.
 
