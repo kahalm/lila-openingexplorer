@@ -124,11 +124,15 @@ docker run --rm --name rookhub-explorer-sync --user 1000:1000 --network rookhub-
    Cookie-Sitzung mit Origin/Referer der Seite. Der Nachtlauf stimmt der Lizenz im Namen des Users zu
    (Entscheidung 2026-10-30). Danach spielt er jedes OTB-Paket ein, das im Eingang liegt
    (`masters/inbox/*.7z`, nach dem Import gelöscht, und `LUMBRA_DROP/*.7z`, nur lesend, bleibt liegen):
-   jede Datei (sha256) nur einmal, Namen mit „Online“ oder ohne „OTB“ übersprungen. Erst ein
-   eingespieltes Paket markiert die Version als erledigt; sonst lädt der nächste Lauf erneut. Sperrt
+   jede Datei (sha256) nur einmal, Namen mit „Online“ oder ohne „OTB“ übersprungen. Erst das für die
+   Version geladene Paket (per sha256 mit ihr verknüpft) markiert sie als erledigt, sobald es eingespielt
+   oder abgelehnt ist — eine alte, schon bekannte Datei im Drop-Ordner zählt nicht; sonst lädt der nächste
+   Lauf erneut (mit `LUMBRA_FETCH=0`: ein passendes, in diesem Lauf NEU eingespieltes Paket). Sperrt
    Lumbra die Datei gerade (kurz nach jedem Download), versucht es der nächste Lauf. `-e LUMBRA_FETCH=0`
    schaltet den Abruf ab, dann steht nur `NEUE VERSION` im Log und ein Mensch legt die Datei in den
    Eingang. Von Hand: `lumbra-fetch "OTB partial 2026" /data/masters/inbox` im Image.
+   Trockenlauf mit Stubs (kein Netz): `docker run --rm --network none -v "$PWD":/src:ro
+   rookhub-explorer:latest bash /src/tests/rookhub/test-explorer-sync.sh`.
 2. **Lichess**: jeder Monat ≥ `LICHESS_FROM`, der nicht in `state/lichess-imported.txt` steht, neueste
    zuerst: Download (fortsetzbar), sha256 gegen `sha256sums.txt`, gefilterter Import, Dump löschen.
 

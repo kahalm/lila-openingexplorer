@@ -114,12 +114,15 @@ lumbra_version() {
 }
 
 # Bietet Lumbra eine Version an, die noch nicht eingespielt ist, wird sie in den Eingang geladen.
-# Eine neue Version hängt es als „<Titel>@<Version>“ an das Array `pending` des Aufrufers (sync_masters)
-# an; log schreibt auf stdout, deshalb kein $(…). Exit 1 = Seite ohne Version oder
+# Ein geladenes Paket hängt es als „<Titel>@<Version>|<sha256 der geladenen Datei>“ an das Array
+# `pending` des Aufrufers (sync_masters) an — erst NACH erfolgreichem Download (S2-002): ein gesperrter
+# oder gescheiterter Abruf darf die Version nicht als gesehen markieren. Mit LUMBRA_FETCH=0 ohne sha
+# („<Titel>@<Version>|“, dann zählt ein in diesem Lauf neu eingespieltes passendes Paket).
+# log schreibt auf stdout, deshalb kein $(…) um fetch_lumbra. Exit 1 = Seite ohne Version oder
 # Abruf gescheitert; eine gesperrte Datei (Lumbra sperrt kurz nach jedem Download) ist kein Fehler,
 # der nächste Lauf versucht es erneut.
 fetch_lumbra() {
-    local title=$1 version frc=0
+    local title=$1 version frc=0 path=
     version=$(lumbra_version "$title") || true
     if [[ -z $version ]]; then
         log "Lumbra „$title“: keine Version auf $LUMBRA_AREA gefunden (Seite umgebaut?)"
@@ -128,24 +131,32 @@ fetch_lumbra() {
     if grep -qsxF "$title@$version" "$STATE/lumbra-seen.txt"; then
         return 0
     fi
-    pending+=("$title@$version")
     if [[ $LUMBRA_FETCH != 1 ]]; then
+        pending+=("$title@$version|")
         log "Lumbra „$title“: NEUE VERSION $version — Abruf aus (LUMBRA_FETCH=0), bitte im Browser laden" \
             "($LUMBRA_AREA) und nach masters/inbox/ legen${LUMBRA_DROP:+ oder in den Drop-Ordner}"
         return 0
     fi
     log "Lumbra „$title“: neue Version $version, Download"
-    lumbra-fetch "$title" "$LUMBRA_INBOX" > /dev/null || frc=$?
+    # stdout von lumbra-fetch = Pfad der geladenen Datei (Meldungen gehen auf stderr).
+    path=$(lumbra-fetch "$title" "$LUMBRA_INBOX") || frc=$?
     case $frc in
-        0) ;;
+        0) path=$(tail -n 1 <<< "$path")
+           if [[ ! -f $path ]]; then
+               log "Lumbra „$title“: Download meldet keine Datei („$path“)"
+               return 1
+           fi
+           pending+=("$title@$version|$(sha256sum "$path" | cut -d' ' -f1)") ;;
         75) log "Lumbra „$title“: Datei bei Lumbra gerade gesperrt — nächster Lauf" ;;
         *) log "Lumbra „$title“: Download fehlgeschlagen (Exit $frc)"; return 1 ;;
     esac
 }
 
 # Eine Datei einspielen. Exit 0 = eingespielt oder schon bekannt, 1 = Fehler.
+# LUMBRA_NEW=1, wenn die Datei (sha256) in DIESEM Aufruf erstmals eingespielt/abgelehnt wurde.
 import_lumbra_file() {
     local file=$1 sum st
+    LUMBRA_NEW=0
     sum=$(sha256sum "$file" | cut -d' ' -f1)
     if grep -qsx "$sum.*" "$STATE/lumbra-imported.txt" "$STATE/lumbra-rejected.txt"; then
         return 0
@@ -160,6 +171,7 @@ import_lumbra_file() {
         *) log "Lumbra: Import $(basename "$file") fehlgeschlagen (Exit 7z/import-masters/tail: ${st[*]})"
            return 1 ;;
     esac
+    LUMBRA_NEW=1
     log "Lumbra: $(basename "$file") fertig"
 }
 
@@ -172,7 +184,7 @@ lumbra_matches() {
 }
 
 sync_masters() {
-    local year rc=0 file name title entry
+    local year rc=0 file name title entry sum
     local -a imported=() titles=() pending=()
     year=$(date +%Y)
     titles=("OTB partial $year")
@@ -192,7 +204,9 @@ sync_masters() {
             continue
         fi
         if import_lumbra_file "$file"; then
-            imported+=("$name")
+            # Nur in diesem Lauf neu eingespielte Dateien: eine alte, schon bekannte Datei im
+            # Drop-Ordner (bleibt liegen, Name ohne Version) darf keine neue Version abhaken (S2-002).
+            (( LUMBRA_NEW )) && imported+=("$name")
             [[ $file == "$LUMBRA_INBOX"/* ]] && rm -f "$file"
         else
             rc=1
@@ -200,10 +214,18 @@ sync_masters() {
     done
     shopt -u nullglob nocaseglob
 
-    # Eine neue Version gilt als eingespielt, sobald ein passendes Paket durch den Import kam;
-    # sonst holt der nächste Lauf sie erneut.
+    # Eine neue Version gilt als eingespielt, sobald GENAU die dafür geladene Datei (sha256) bekannt
+    # ist (eingespielt oder abgelehnt, auch schon früher); ohne sha (LUMBRA_FETCH=0), sobald ein
+    # passendes Paket in diesem Lauf neu eingespielt wurde. Sonst holt der nächste Lauf sie erneut.
     for entry in "${pending[@]}"; do
+        sum=${entry##*|}
+        entry=${entry%|*}
         title=${entry%@*}
+        if [[ -n $sum ]]; then
+            grep -qs "^$sum " "$STATE/lumbra-imported.txt" "$STATE/lumbra-rejected.txt" \
+                && echo "$entry" >> "$STATE/lumbra-seen.txt"
+            continue
+        fi
         for name in "${imported[@]}"; do
             if lumbra_matches "$title" "$name"; then
                 echo "$entry" >> "$STATE/lumbra-seen.txt"
